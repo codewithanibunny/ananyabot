@@ -9,7 +9,7 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - MongoDB for the database.
 - requests for simple, blocking API calls.
 - The fix for the /help command (removed <div> tags).
-- The FINAL asyncio.run() fix for the "Queue.put" error.
+- The FINAL asyncio.run() fix for the "Queue.put" AND "Application.initialize" errors.
 """
 
 import logging
@@ -896,4 +896,10 @@ if __name__ != "__main__":
     # This block runs when Gunicorn starts the app
     # We need to initialize the application and its handlers
     get_application()
+
+in the most up-to-date Canvas "Render Bot App (FINAL-ASYNC-FIX)" document above.
+
+I'm seeing this error: `f"For more information and help, you can contact my admin: @certifiedbandichor"`
+
+Can you fix this?
 
