@@ -9,12 +9,14 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - MongoDB for the database.
 - requests for simple, blocking API calls.
 - The fix for the /help command (removed <div> tags).
+- The FINAL asyncio.run() fix for the "Queue.put" error.
 """
 
 import logging
 import os
 import requests  # <-- The stable, synchronous library
 import json
+import asyncio  # <-- THE NEW FIX IS HERE
 from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated
 from telegram.ext import (
     Application,
@@ -29,7 +31,7 @@ from telegram.constants import ParseMode, ChatType
 # --- Flask App for Render ---
 from flask import Flask, request as flask_request
 import pymongo
-import threading # <-- Import threading for the lock
+import threading  # <-- Import threading for the lock
 
 # --- CONFIGURATION (from Render Environment Variables) ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -79,7 +81,7 @@ try:
     users_col = db.users
     blocked_col = db.blocked_users
     chats_col = db.active_chats
-    history_col = db.chat_history # <-- Collection for chat memory
+    history_col = db.chat_history  # <-- Collection for chat memory
     logger.info("MongoDB client created and collections initialized.")
 except Exception as e:
     logger.error(f"FATAL: Could not create MongoDB client: {e}")
@@ -88,7 +90,7 @@ except Exception as e:
     users_col = None
     blocked_col = None
     chats_col = None
-    history_col = None # <-- Make sure this is also None on failure
+    history_col = None  # <-- Make sure this is also None on failure
 
 # --- MONGODB DATABASE FUNCTIONS ---
 def is_db_connected():
@@ -97,18 +99,19 @@ def is_db_connected():
         or users_col is None
         or blocked_col is None
         or chats_col is None
-        or history_col is None # <-- Check for history collection
+        or history_col is None  # <-- Check for history collection
         or client is None
     ):
         logger.error("Database client is not configured.")
         return False
     # Test connection
     try:
-        client.server_info() # This will raise an exception if connection is bad
+        client.server_info()  # This will raise an exception if connection is bad
         return True
     except Exception as e:
         logger.error(f"Database connection test failed: {e}")
         return False
+
 
 def log_user(user: Update.effective_user):
     if not user or not is_db_connected():
@@ -126,6 +129,7 @@ def log_user(user: Update.effective_user):
     except Exception as e:
         logger.error(f"Error in log_user: {e}")
 
+
 def is_user_blocked(user_id: int) -> bool:
     if is_admin(user_id) or not is_db_connected():
         return False
@@ -134,6 +138,7 @@ def is_user_blocked(user_id: int) -> bool:
     except Exception as e:
         logger.error(f"Error in is_user_blocked: {e}")
         return False
+
 
 def block_user(user_id_to_block: int) -> str:
     if not is_db_connected():
@@ -149,6 +154,7 @@ def block_user(user_id_to_block: int) -> str:
         logger.error(f"Error in block_user: {e}")
         return "An error occurred while blocking."
 
+
 def unblock_user(user_id_to_unblock: int) -> str:
     if not is_db_connected():
         return "Database error."
@@ -161,6 +167,7 @@ def unblock_user(user_id_to_unblock: int) -> str:
     except Exception as e:
         logger.error(f"Error in unblock_user: {e}")
         return "An error occurred while unblocking."
+
 
 def update_active_chats(chat_id: int, action: str = "add"):
     if not is_db_connected():
@@ -175,8 +182,10 @@ def update_active_chats(chat_id: int, action: str = "add"):
     except Exception as e:
         logger.error(f"Error in update_active_chats: {e}")
 
+
 # --- NEW CHAT HISTORY FUNCTIONS ---
-CHAT_HISTORY_LIMIT = 20 # Max number of messages (10 user, 10 bot) to keep
+CHAT_HISTORY_LIMIT = 20  # Max number of messages (10 user, 10 bot) to keep
+
 
 def get_chat_history(chat_id: int) -> list:
     """Fetches the chat history from MongoDB."""
@@ -191,6 +200,7 @@ def get_chat_history(chat_id: int) -> list:
         logger.error(f"Error getting chat history: {e}")
         return []
 
+
 def save_chat_history(chat_id: int, history: list):
     """Saves the updated chat history to MongoDB, trimming if necessary."""
     if not is_db_connected():
@@ -199,21 +209,20 @@ def save_chat_history(chat_id: int, history: list):
         # Trim history to the last CHAT_HISTORY_LIMIT messages
         if len(history) > CHAT_HISTORY_LIMIT:
             history = history[-CHAT_HISTORY_LIMIT:]
-        
+
         history_col.update_one(
-            {"_id": chat_id},
-            {"$set": {"history": history}},
-            upsert=True
+            {"_id": chat_id}, {"$set": {"history": history}}, upsert=True
         )
     except Exception as e:
         logger.error(f"Error saving chat history: {e}")
+
 
 # --- ADMIN COMMAND HANDLERS ---
 def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command."
+            text="You do not have permission to use this command.",
         )
         return
     help_text = (
@@ -232,22 +241,20 @@ def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/admin_set_prompt &lt;name&gt; &lt;prompt_text&gt;</code> - Sets a new system prompt for a personality."
     )
     context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=help_text,
-        parse_mode=ParseMode.HTML
+        chat_id=update.effective_chat.id, text=help_text, parse_mode=ParseMode.HTML
     )
+
 
 def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command."
+            text="You do not have permission to use this command.",
         )
         return
     if not is_db_connected():
         context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Error: Database is not connected."
+            chat_id=update.effective_chat.id, text="Error: Database is not connected."
         )
         return
     try:
@@ -263,20 +270,20 @@ def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=stats_text,
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
         )
     except Exception as e:
         logger.error(f"Error in admin_stats_command: {e}")
         context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Error fetching stats."
+            chat_id=update.effective_chat.id, text="Error fetching stats."
         )
+
 
 def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command."
+            text="You do not have permission to use this command.",
         )
         return
     try:
@@ -285,15 +292,15 @@ def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot.send_message(chat_id=update.effective_chat.id, text=message)
     except (IndexError, ValueError):
         context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Usage: /block <user_id>"
+            chat_id=update.effective_chat.id, text="Usage: /block <user_id>"
         )
+
 
 def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command."
+            text="You do not have permission to use this command.",
         )
         return
     try:
@@ -302,15 +309,15 @@ def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot.send_message(chat_id=update.effective_chat.id, text=message)
     except (IndexError, ValueError):
         context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Usage: /unblock <user_id>"
+            chat_id=update.effective_chat.id, text="Usage: /unblock <user_id>"
         )
+
 
 def admin_get_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command."
+            text="You do not have permission to use this command.",
         )
         return
     try:
@@ -324,19 +331,19 @@ def admin_get_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="Personality not found. Use 'default', 'spiritual', or 'nationalist'."
+                text="Personality not found. Use 'default', 'spiritual', or 'nationalist'.",
             )
     except IndexError:
         context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Usage: /admin_get_prompt <name>"
+            chat_id=update.effective_chat.id, text="Usage: /admin_get_prompt <name>"
         )
+
 
 def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command."
+            text="You do not have permission to use this command.",
         )
         return
     try:
@@ -344,26 +351,26 @@ def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if personality_name not in PERSONALITIES:
             context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="Personality not found. Use 'default', 'spiritual', or 'nationalist'."
+                text="Personality not found. Use 'default', 'spiritual', or 'nationalist'.",
             )
             return
         new_prompt = " ".join(context.args[1:])
         if not new_prompt:
             context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Error: Prompt cannot be empty."
+                chat_id=update.effective_chat.id, text="Error: Prompt cannot be empty."
             )
             return
         PERSONALITIES[personality_name] = new_prompt
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"Successfully updated prompt for '{personality_name}'."
+            text=f"Successfully updated prompt for '{personality_name}'.",
         )
     except IndexError:
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Usage: /admin_set_prompt <name> <new_prompt_text>"
+            text="Usage: /admin_set_prompt <name> <new_prompt_text>",
         )
+
 
 # --- PUBLIC COMMAND HANDLERS ---
 def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -388,17 +395,16 @@ def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     welcome_text += "\n\nType /help to see all my commands and personalities!"
     context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=welcome_text,
-        parse_mode=ParseMode.HTML
+        chat_id=update.effective_chat.id, text=welcome_text, parse_mode=ParseMode.HTML
     )
+
 
 def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user(user)
     if is_user_blocked(user.id):
         return
-    
+
     # --- THIS IS THE FIX ---
     # Removed the <div> tags which are not supported by Telegram's HTML parser
     help_text = (
@@ -419,15 +425,13 @@ def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=help_text,
-            parse_mode=ParseMode.HTML
+            chat_id=update.effective_chat.id, text=help_text, parse_mode=ParseMode.HTML
         )
     except Exception as e:
         logger.error(f"Error in /help command: {e}")
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="There was an error showing the help message."
+            text="There was an error showing the help message.",
         )
 
 
@@ -446,9 +450,9 @@ def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="I don't recognize that personality."
+            chat_id=update.effective_chat.id, text="I don't recognize that personality."
         )
+
 
 def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -461,8 +465,9 @@ def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history_col.delete_one({"_id": update.effective_chat.id})
     context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="I'm back to my natural self! I've also cleared our recent chat history for a fresh start."
+        text="I'm back to my natural self! I've also cleared our recent chat history for a fresh start.",
     )
+
 
 def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -472,7 +477,7 @@ def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user_id):
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Sorry, this is an admin-only command."
+            text="Sorry, this is an admin-only command.",
         )
         return
     query_text = " ".join(context.args)
@@ -480,9 +485,9 @@ def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = "Provide a summary of the top 5 latest world and national news headlines."
     else:
         query = f"Provide a news summary about: {query_text}"
-    
+
     context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    
+
     news_system_prompt = (
         "You are a news summarizer. You must provide concise, factual summaries of the news. "
         "Your task is to act as a news reporting service. "
@@ -495,18 +500,25 @@ def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query,
             system_prompt_override=news_system_prompt,
             use_search=True,
-            chat_history=[] # Pass empty history
+            chat_history=[],  # Pass empty history
         )
         context.bot.send_message(chat_id=update.effective_chat.id, text=response_text)
     except Exception as e:
         logger.error(f"Error in /news command: {e}")
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Sorry, I couldn't fetch the news right now. Please try again later."
+            text="Sorry, I couldn't fetch the news right now. Please try again later.",
         )
 
+
 # --- GEMINI API CALL (Synchronous Version with History) ---
-def get_gemini_response(prompt: str, chat_history: list, system_prompt_override: str = None, use_search: bool = False, chat_personality: str = "default") -> str:
+def get_gemini_response(
+    prompt: str,
+    chat_history: list,
+    system_prompt_override: str = None,
+    use_search: bool = False,
+    chat_personality: str = "default",
+) -> str:
     """
     Sends a prompt to the Gemini API using the synchronous requests client.
     Now includes chat history.
@@ -527,7 +539,7 @@ def get_gemini_response(prompt: str, chat_history: list, system_prompt_override:
     conversation_history = chat_history + [{"role": "user", "parts": [{"text": prompt}]}]
 
     payload = {
-        "contents": conversation_history, # Send the whole conversation
+        "contents": conversation_history,  # Send the whole conversation
         "systemInstruction": {"parts": [{"text": system_prompt}]},
     }
 
@@ -542,7 +554,7 @@ def get_gemini_response(prompt: str, chat_history: list, system_prompt_override:
         response = requests.post(api_url, json=payload, headers=headers, timeout=60)
         response.raise_for_status()
         result = response.json()
-        
+
         text = (
             result.get("candidates", [{}])[0]
             .get("content", {})
@@ -559,31 +571,36 @@ def get_gemini_response(prompt: str, chat_history: list, system_prompt_override:
         return text
 
     except requests.exceptions.HTTPError as e:
-        logger.error(f"Gemini API request failed with status {e.response.status_code}: {e.response.text}")
+        logger.error(
+            f"Gemini API request failed with status {e.response.status_code}: {e.response.text}"
+        )
         if e.response.status_code == 400:
-             return "Sorry, my AI brain had a problem with that request. (Admin: 400 Bad Request)"
+            return "Sorry, my AI brain had a problem with that request. (Admin: 400 Bad Request)"
         if e.response.status_code == 403:
-             return "Sorry, my AI brain isn't working right now. (Admin: Check Gemini API Key permissions)"
+            return "Sorry, my AI brain isn't working right now. (Admin: Check Gemini API Key permissions)"
         if e.response.status_code == 500:
-             return "Sorry, my AI brain is having problems. (Admin: 500 Server Error)"
+            return "Sorry, my AI brain is having problems. (Admin: 500 Server Error)"
         return f"Sorry, I'm having trouble connecting to my brain. (Error: {e})"
     except requests.exceptions.RequestException as e:
         logger.error(f"Gemini API request failed: {e}")
         return f"Sorry, I'm having trouble connecting to my brain. (Error: {e})"
     except Exception as e:
-        logger.error(f"Error processing Gemini response: {e}. Full response: {response.text if 'response' in locals() else 'N/A'}")
+        logger.error(
+            f"Error processing Gemini response: {e}. Full response: {response.text if 'response' in locals() else 'N/A'}"
+        )
         return "Sorry, I encountered an unexpected error."
+
 
 # --- CORE MESSAGE HANDLER (Now with History) ---
 def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     chat_id = chat.id
-    
+
     log_user(user)
     if is_user_blocked(user.id):
         return
-        
+
     prompt = update.message.text
     if not prompt:
         return
@@ -600,38 +617,37 @@ def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_mention:
             prompt = prompt.replace(f"@{context.bot.username}", "").strip()
 
-    if not prompt: # Check again in case the prompt was *only* a mention
+    if not prompt:  # Check again in case the prompt was *only* a mention
         return
-        
+
     personality = context.chat_data.get("personality", "default")
-    
+
     context.bot.send_chat_action(chat_id=chat_id, action="typing")
-    
+
     try:
         # 1. Get history from DB
         chat_history = get_chat_history(chat_id)
-        
+
         # 2. Get response from Gemini
         response_text = get_gemini_response(
-            prompt, 
-            chat_history=chat_history, 
-            chat_personality=personality
+            prompt, chat_history=chat_history, chat_personality=personality
         )
-        
+
         # 3. Send response to user
         context.bot.send_message(chat_id=chat_id, text=response_text)
-        
+
         # 4. Update history in DB
         chat_history.append({"role": "user", "parts": [{"text": prompt}]})
         chat_history.append({"role": "model", "parts": [{"text": response_text}]})
         save_chat_history(chat_id, chat_history)
-        
+
     except Exception as e:
         logger.error(f"Error in handle_message: {e}")
         context.bot.send_message(
             chat_id=chat_id,
-            text="Sorry, I had a little hiccup. Could you try that again?"
+            text="Sorry, I had a little hiccup. Could you try that again?",
         )
+
 
 # --- CHAT MEMBER HANDLER ---
 def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -648,14 +664,17 @@ def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Removed from chat: {chat_id}")
             update_active_chats(chat_id, "remove")
 
+
 # --- ADMIN HELPER ---
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
+
 
 # --- BOT & WEBHOOK INITIALIZATION ---
 # A lock to ensure only one thread initializes the bot
 init_lock = threading.Lock()
 application = None
+
 
 def get_application():
     """Initializes the Telegram Application object."""
@@ -665,22 +684,32 @@ def get_application():
             try:
                 if TELEGRAM_BOT_TOKEN:
                     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-                    
+
                     # Register all handlers
                     # Admin
                     application.add_handler(CommandHandler("admin", admin_panel))
-                    application.add_handler(CommandHandler("admin_stats", admin_stats_command))
+                    application.add_handler(
+                        CommandHandler("admin_stats", admin_stats_command)
+                    )
                     application.add_handler(CommandHandler("block", block_command))
                     application.add_handler(CommandHandler("unblock", unblock_command))
-                    application.add_handler(CommandHandler("admin_get_prompt", admin_get_prompt))
-                    application.add_handler(CommandHandler("admin_set_prompt", admin_set_prompt))
+                    application.add_handler(
+                        CommandHandler("admin_get_prompt", admin_get_prompt)
+                    )
+                    application.add_handler(
+                        CommandHandler("admin_set_prompt", admin_set_prompt)
+                    )
                     application.add_handler(CommandHandler("news", news_command))
                     # Public
                     application.add_handler(CommandHandler("start", start))
                     application.add_handler(CommandHandler("help", show_help))
                     application.add_handler(CommandHandler("reset", reset_personality))
-                    application.add_handler(CommandHandler("spiritual", set_personality))
-                    application.add_handler(CommandHandler("nationalist", set_personality))
+                    application.add_handler(
+                        CommandHandler("spiritual", set_personality)
+                    )
+                    application.add_handler(
+                        CommandHandler("nationalist", set_personality)
+                    )
                     # Message
                     application.add_handler(
                         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
@@ -689,30 +718,37 @@ def get_application():
                     application.add_handler(
                         ChatMemberHandler(track_chats, ChatMemberHandler.CHAT_MEMBER)
                     )
-                    logger.info("Telegram Application built and handlers registered successfully.")
+                    logger.info(
+                        "Telegram Application built and handlers registered successfully."
+                    )
                 else:
-                    logger.error("FATAL: TELEGRAM_BOT_TOKEN is not set. Application not built.")
+                    logger.error(
+                        "FATAL: TELEGRAM_BOT_TOKEN is not set. Application not built."
+                    )
                     application = None
             except Exception as e:
                 logger.error(f"FATAL: Failed to build Telegram application. ERROR: {e}")
                 application = None
     return application
 
+
 # --- FLASK APP FOR RENDER ---
 app = Flask(__name__)
 # Initialize the bot object immediately when the app starts
-get_application() 
+get_application()
+
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>", methods=["GET"])
 def health_check(path):
     return "Hello! I am Ananya, and I am alive."
 
+
 @app.route("/admin_debug/<int:user_id>", methods=["GET"])
 def debug_vars(user_id):
     if not is_admin(user_id):
         return "Access denied.", 403
-    
+
     def get_key_preview(key):
         val = os.environ.get(key)
         if val is None:
@@ -727,18 +763,17 @@ def debug_vars(user_id):
     else:
         admin_check = f"<span style='color: green;'>Set (value: {admin_id})</span>"
 
-    db_check = (
-        "<b>Database:</b> <span style='color: red;'>NOT CONNECTED (Check MONGODB_URI)</span>"
-    )
-    if is_db_connected(): # Use our safe check
+    db_check = "<b>Database:</b> <span style='color: red;'>NOT CONNECTED (Check MONGODB_URI)</span>"
+    if is_db_connected():  # Use our safe check
         db_check = "<b>Database:</b> <span style='color: green;'>MongoDB Connected!</span>"
     else:
         # Try to get a specific error
         try:
             client.server_info()
         except Exception as e:
-            db_check = f"<b>Database:</b> <span style='color: red;'>MongoDB FAILED: {e}</span>"
-
+            db_check = (
+                f"<b>Database:</b> <span style='color: red;'>MongoDB FAILED: {e}</span>"
+            )
 
     return (
         "<h1>Ananya Bot - Admin Debug</h1>"
@@ -750,12 +785,13 @@ def debug_vars(user_id):
         f"<p>{db_check}</p>"
     ), 200
 
-# --- This is the main webhook endpoint ---
+
+# --- THIS IS THE FINAL FIX ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """
     This function is called by Telegram every time a user sends a message.
-    It is synchronous, but it calls the async functions within the library.
+    It uses asyncio.run() to safely call the async bot code from a sync function.
     """
     if application is None:
         logger.error(
@@ -769,15 +805,18 @@ def webhook():
         # Create an Update object from the JSON
         update = Update.de_json(update_json, application.bot)
         
-        # Process the update using the bot's handlers
-        # This is a synchronous call that manages its own async loop
-        application.update_queue.put(update)
+        # --- THE FIX ---
+        # Run the async process_update in its own event loop
+        # This resolves the "coroutine 'Queue.put' was never awaited" error
+        asyncio.run(application.process_update(update))
+        # --- END OF FIX ---
 
         return "ok", 200
     except Exception as e:
         logger.error(f"Error in webhook: {e}")
         return "error", 500
 
+# --- This function also needs the asyncio.run() fix ---
 @app.route("/set_webhook", methods=["GET"])
 def set_webhook():
     """
@@ -795,34 +834,42 @@ def set_webhook():
         return "Could not determine host URL.", 500
 
     host = flask_request.headers.get("x-forwarded-host", host)
-    webhook_url = f"httpsZ://{host}/webhook" # Render is always https
+    webhook_url = f"https{os.environ.get('RENDER_EXTERNAL_URL', '://' + host)}/webhook" # Render is always https
 
     try:
-        # Set the webhook
-        application.bot.set_webhook(
-            url=webhook_url,
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-        )
-        
-        # Set the bot's commands (this is safe to do)
-        bot_commands = [
-            BotCommand("start", "Welcome message"),
-            BotCommand("help", "Show help and commands"),
-            BotCommand("reset", "Reset to default personality"),
-            BotCommand("spiritual", "Switch to spiritual guide mode"),
-            BotCommand("nationalist", "Switch to proud nationalist mode"),
-        ]
-        application.bot.set_my_commands(bot_commands)
-        
-        # Set the bot's name
-        application.bot.set_my_name("Ananya")
+        # --- THE FIX ---
+        # We must use asyncio.run() to call async functions
+        async def _set_webhook_async():
+            await application.initialize() # Initialize for this task
+            await application.bot.set_webhook(
+                url=webhook_url,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+            )
+            
+            # Set the bot's commands
+            bot_commands = [
+                BotCommand("start", "Welcome message"),
+                BotCommand("help", "Show help and commands"),
+                BotCommand("reset", "Reset to default personality"),
+                BotCommand("spiritual", "Switch to spiritual guide mode"),
+                BotCommand("nationalist", "Switch to proud nationalist mode"),
+            ]
+            await application.bot.set_my_commands(bot_commands)
+            
+            # Set the bot's name
+            await application.bot.set_my_name("Ananya")
+            await application.shutdown() # Shutdown after this task
+
+        asyncio.run(_set_webhook_async())
+        # --- END OF FIX ---
         
         return f"Webhook successfully set to: {webhook_url}. Bot name and commands updated.", 200
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
         return f"Failed to set webhook: {e}", 500
 
+# --- This function also needs the asyncio.run() fix ---
 @app.route("/remove_webhook", methods=["GET"])
 def remove_webhook():
     if application is None:
@@ -831,7 +878,15 @@ def remove_webhook():
         )
         return "error: application not configured", 500
     try:
-        application.bot.delete_webhook(drop_pending_updates=True)
+        # --- THE FIX ---
+        async def _remove_webhook_async():
+            await application.initialize()
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await application.shutdown()
+
+        asyncio.run(_remove_webhook_async())
+        # --- END OF FIX ---
+        
         return "Webhook successfully removed.", 200
     except Exception as e:
         logger.error(f"Failed to remove webhook: {e}")
