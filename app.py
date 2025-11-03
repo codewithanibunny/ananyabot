@@ -3,19 +3,17 @@
 Ananya - Your Friendly Telegram Bot (Render Version)
 Powered by Google Gemini
 
-This is the final, corrected version. It includes:
-- Flask[async] for Render.
-- gunicorn as the server.
-- MongoDB for the database.
-- httpx for non-blocking API calls.
-- The FINAL fix for the 'Application.initialize()' error.
+This version is the final, stable, synchronous version and includes:
+- Flask and gunicorn for the web server.
+- MongoDB for all persistence.
+- httpx for reliable, synchronous API calls.
+- *** NEW: MongoDB-backed long-term chat memory ***
 """
 
 import logging
 import os
-import httpx  # The async API call library
+import httpx  # Using synchronous httpx client
 import json
-import asyncio
 from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated
 from telegram.ext import (
     Application,
@@ -27,7 +25,6 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode, ChatType
 
-# --- Vercel-specific Imports ---
 from flask import Flask, request as flask_request
 import pymongo
 
@@ -41,6 +38,10 @@ try:
 except (ValueError, TypeError):
     print("FATAL: ADMIN_USER_ID is not set or invalid.")
     ADMIN_USER_ID = 0
+
+# --- NEW: Chat History Configuration ---
+# We will store the last 20 messages (10 user, 10 bot)
+CHAT_HISTORY_LENGTH = 20
 
 # --- PERSONALITY PROMPTS ---
 PERSONALITIES = {
@@ -79,7 +80,10 @@ try:
     users_col = db.users
     blocked_col = db.blocked_users
     chats_col = db.active_chats
-    logger.info("MongoDB client created.")
+    # --- NEW: Chat History Collection ---
+    chat_history_col = db.chat_history
+    
+    logger.info("MongoDB client created and all collections initialized.")
 except Exception as e:
     logger.error(f"FATAL: Could not create MongoDB client: {e}")
     client = None
@@ -87,20 +91,64 @@ except Exception as e:
     users_col = None
     blocked_col = None
     chats_col = None
+    chat_history_col = None # <-- NEW
 
 # --- MONGODB DATABASE FUNCTIONS ---
 def is_db_connected():
+    # --- NEW: Added chat_history_col to the check ---
     if (
         db is None
         or users_col is None
         or blocked_col is None
         or chats_col is None
         or client is None
+        or chat_history_col is None
     ):
         logger.error("Database client is not configured.")
         return False
     return True
 
+# --- NEW: Functions to get, update, and reset chat history ---
+
+def get_chat_history(chat_id: int) -> list:
+    """Fetches the chat history for a given chat ID from MongoDB."""
+    if not is_db_connected():
+        return []
+    try:
+        chat_doc = chat_history_col.find_one({"_id": str(chat_id)})
+        if chat_doc and "history" in chat_doc:
+            return chat_doc["history"]
+    except Exception as e:
+        logger.error(f"Error getting chat history: {e}")
+    return []
+
+def update_chat_history(chat_id: int, new_history: list):
+    """Updates and prunes the chat history for a given chat ID in MongoDB."""
+    if not is_db_connected():
+        return
+    try:
+        # Prune history: Keep only the last CHAT_HISTORY_LENGTH messages
+        pruned_history = new_history[-CHAT_HISTORY_LENGTH:]
+        
+        chat_history_col.update_one(
+            {"_id": str(chat_id)},
+            {"$set": {"history": pruned_history}},
+            upsert=True
+        )
+    except Exception as e:
+        logger.error(f"Error updating chat history: {e}")
+
+def reset_chat_history(chat_id: int):
+    """Deletes the chat history for a given chat ID."""
+    if not is_db_connected():
+        return
+    try:
+        chat_history_col.delete_one({"_id": str(chat_id)})
+        logger.info(f"Chat history reset for chat_id: {chat_id}")
+    except Exception as e:
+        logger.error(f"Error resetting chat history: {e}")
+
+# --- (Existing DB functions: log_user, is_user_blocked, etc... are unchanged) ---
 def log_user(user: Update.effective_user):
     if not user or not is_db_connected():
         return
@@ -166,7 +214,8 @@ def update_active_chats(chat_id: int, action: str = "add"):
     except Exception as e:
         logger.error(f"Error in update_active_chats: {e}")
 
-# --- ADMIN COMMAND HANDLERS ---
+# --- ADMIN COMMAND HANDLERS (Unchanged) ---
+# ... (all admin functions: admin_panel, admin_stats_command, etc. are identical) ...
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text(
@@ -294,10 +343,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.chat_data.setdefault("personality", "default")
     update_active_chats(update.effective_chat.id, "add")
+    
+    # --- NEW: Reset history on /start ---
+    reset_chat_history(update.effective_chat.id)
+    
     welcome_text = (
         f"Hi {user.first_name}! I'm Ananya, your friendly AI assistant. 🇮🇳\n\n"
         "I'm here to chat, answer questions, and help you out. "
-        "By default, I'm in my natural, helpful personality."
+        "By default, I'm in my natural, helpful personality.\n"
+        "(P.S. I've reset our conversation memory for a fresh start!)"
     )
     if (
         update.effective_chat.type == ChatType.GROUP
@@ -311,6 +365,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Unchanged) ...
     user = update.effective_user
     log_user(user)
     if is_user_blocked(user.id):
@@ -321,12 +376,12 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <b>In Private Chat:</b> I respond to all messages.\n"
         f"• <b>In Group Chats:</b> I respond when you @-mention me (<code>@{context.bot.username}</code>) or when you reply to one of my messages.\n\n"
         "<b>Public Commands:</b>\n"
-        "• <div><code>/start</code> - Welcome message.</div>\n"
+        "• <div><code>/start</code> - Welcome message & resets chat memory.</div>\n"
         "• <div><code>/help</code> - Shows this help panel.</div>\n"
-        "• <div><code>/reset</code> - Resets me to my default friendly personality.</div>\n\n"
+        "• <div><code>/reset</code> - Resets me to my default friendly personality & clears chat memory.</div>\n\n"
         "<b>Personalities:</b>\n"
-        "• <div><code>/spiritual</code> - I become a spiritual guide based on Hindu granths.</div>\n"
-        "• <div><code>/nationalist</code> - I become a proud, patriotic Indian.</div>\n\n"
+        "• <div><code>/spiritual</code> - I become a spiritual guide based on Hindu granths. (Resets chat memory)</div>\n"
+        "• <div><code>/nationalist</code> - I become a proud, patriotic Indian. (Resets chat memory)</div>\n\n"
         f"For more information and help, you can contact my admin: <code>{ADMIN_USER_ID}</code>"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
@@ -336,11 +391,15 @@ async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user(user)
     if is_user_blocked(user.id):
         return
+        
+    # --- NEW: Reset history when changing personality ---
+    reset_chat_history(update.effective_chat.id)
+    
     command = update.message.text.split("@")[0][1:].lower()
     if command in PERSONALITIES:
         context.chat_data["personality"] = command
         await update.message.reply_text(
-            f"I am now in <b>{command}</b> mode. How can I help?",
+            f"I am now in <b>{command}</b> mode. Our conversation history has been reset for this new topic. How can I help?",
             parse_mode=ParseMode.HTML,
         )
     else:
@@ -351,8 +410,12 @@ async def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user(user)
     if is_user_blocked(user.id):
         return
+        
+    # --- NEW: Reset history on /reset ---
+    reset_chat_history(update.effective_chat.id)
+    
     context.chat_data["personality"] = "default"
-    await update.message.reply_text("I'm back to my natural self!")
+    await update.message.reply_text("I'm back to my natural self! Our conversation history has been reset.")
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -375,8 +438,13 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ALWAYS cite your sources using the (Source: [URL]) format at the end of each news item."
     )
     try:
-        response_text = await get_gemini_response(
-            query, system_prompt_override=news_system_prompt, use_search=True
+        # --- MODIFIED: Call Gemini *without* chat history ---
+        response_text = get_gemini_response(
+            query,
+            update.effective_chat.id, # Pass chat_id, but set use_chat_history to False
+            system_prompt_override=news_system_prompt,
+            use_search=True,
+            use_chat_history=False # <-- This is the key
         )
         await update.message.reply_text(response_text)
     except Exception as e:
@@ -385,15 +453,22 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Sorry, I couldn't fetch the news right now. Please try again later."
         )
 
-# --- GEMINI API CALL (Async Version) ---
-gemini_client = httpx.AsyncClient(timeout=60.0)
+# --- GEMINI API CALL (Now SYNCHRONOUS and with MEMORY) ---
+# We use a synchronous client, as the async one caused event loop errors with gunicorn
+gemini_client = httpx.Client(timeout=60.0)
 
-async def get_gemini_response(
+def get_gemini_response(
     prompt: str,
+    chat_id: int,
     system_prompt_override: str = None,
     use_search: bool = False,
     chat_personality: str = "default",
+    use_chat_history: bool = True
 ) -> str:
+    """
+    Sends a prompt to the Gemini API using the synchronous httpx client.
+    *** NEW: Now supports loading and saving chat history via MongoDB. ***
+    """
     if not GEMINI_API_KEY:
         logger.error("GEMINI_API_KEY not set.")
         return "Sorry, my AI brain is not configured. (Admin: Check GEMINI_API_KEY)"
@@ -405,23 +480,35 @@ async def get_gemini_response(
     else:
         system_prompt = PERSONALITIES.get(chat_personality, PERSONALITIES["default"])
 
+    headers = {"Content-Type": "application/json"}
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
         "systemInstruction": {"parts": [{"text": system_prompt}]},
     }
+    
+    # --- NEW: Build payload with or without history ---
+    chat_history = []
+    if use_chat_history:
+        chat_history = get_chat_history(chat_id)
+        chat_history.append({"role": "user", "parts": [{"text": prompt}]})
+        payload["contents"] = chat_history
+    else:
+        # This is for /news or other one-off commands
+        payload["contents"] = [{"parts": [{"text": prompt}]}]
 
     if use_search:
         payload["tools"] = [{"google_search": {}}]
-        payload["contents"][0]["parts"][0]["text"] = (
-            "Search and answer: " + payload["contents"][0]["parts"][0]["text"]
+        # Add "Search and answer:" only to the *last* user prompt
+        payload["contents"][-1]["parts"][0]["text"] = (
+            "Search and answer: " + payload["contents"][-1]["parts"][0]["text"]
         )
 
-    headers = {"Content-Type": "application/json"}
-
     try:
-        response = await gemini_client.post(api_url, json=payload, headers=headers)
+        # Use the global synchronous client to make the call
+        response = gemini_client.post(api_url, json=payload, headers=headers)
+        
         response.raise_for_status()
         result = response.json()
+
         text = (
             result.get("candidates", [{}])[0]
             .get("content", {})
@@ -431,9 +518,15 @@ async def get_gemini_response(
 
         if not text:
             if result.get("candidates", [{}])[0].get("finishReason") == "SAFETY":
-                return "I'm sorry, I can't respond to that."
-            logger.warning(f"Gemini returned empty text. Full response: {result}")
-            return "I'm not sure how to respond to that."
+                text = "I'm sorry, I can't respond to that."
+            else:
+                logger.warning(f"Gemini returned empty text. Full response: {result}")
+                text = "I'm not sure how to respond to that."
+        
+        # --- NEW: Save the response to history ---
+        if use_chat_history:
+            chat_history.append({"role": "model", "parts": [{"text": text}]})
+            update_chat_history(chat_id, chat_history)
 
         return text
 
@@ -452,6 +545,7 @@ async def get_gemini_response(
     except Exception as e:
         logger.error(f"Error processing Gemini response: {e}. Full response: {response.text if 'response' in locals() else 'N/A'}")
         return "Sorry, I encountered an unexpected error."
+
 
 # --- CORE MESSAGE HANDLER ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -477,7 +571,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     personality = context.chat_data.get("personality", "default")
     await update.message.chat.send_action(action="typing")
     try:
-        response_text = await get_gemini_response(prompt, chat_personality=personality)
+        # --- MODIFIED: Pass chat_id and use_chat_history=True ---
+        response_text = get_gemini_response(
+            prompt, 
+            chat.id, 
+            chat_personality=personality,
+            use_chat_history=True # <-- This is the default
+        )
         await update.message.reply_text(response_text)
     except Exception as e:
         logger.error(f"Error in handle_message: {e}")
@@ -485,8 +585,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Sorry, I had a little hiccup. Could you try that again?"
         )
 
-# --- CHAT MEMBER HANDLER ---
+# --- CHAT MEMBER HANDLER (Unchanged) ---
 async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (unchanged) ...
     result = update.chat_member
     if result is None:
         return
@@ -500,7 +601,7 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Removed from chat: {chat_id}")
             update_active_chats(chat_id, "remove")
 
-# --- ADMIN HELPER ---
+# --- ADMIN HELPER (Unchanged) ---
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
@@ -516,7 +617,7 @@ except Exception as e:
     logger.error(f"FATAL: Failed to build Telegram application. ERROR: {e}")
     application = None
 
-# --- Register all handlers ---
+# --- Register all handlers (Unchanged) ---
 if application:
     # Admin
     application.add_handler(CommandHandler("admin", admin_panel))
@@ -543,7 +644,7 @@ if application:
 else:
     logger.error("Application object is None, not registering handlers.")
 
-# --- FLASK APP FOR RENDER ---
+# --- FLASK APP FOR RENDER (Unchanged) ---
 app = Flask(__name__)
 
 @app.route("/", defaults={"path": ""})
@@ -592,7 +693,7 @@ def debug_vars(user_id):
         f"<p>{db_check}</p>"
     ), 200
 
-# --- THIS IS THE FINAL FIX ---
+# --- WEBHOOK HANDLER (Unchanged, uses the final fix) ---
 @app.route("/webhook", methods=["POST"])
 async def webhook():
     if application is None:
@@ -617,6 +718,7 @@ async def webhook():
         logger.error(f"Error in webhook: {e}")
         return "error", 500
 
+# --- WEBHOOK SET/REMOVE ROUTES (Unchanged) ---
 @app.route("/set_webhook", methods=["GET"])
 async def set_webhook():
     if application is None:
@@ -635,7 +737,6 @@ async def set_webhook():
     webhook_url = f"https://{host}/webhook"
 
     try:
-        # We must initialize/shutdown here too!
         await application.initialize()
         await application.bot.set_webhook(
             url=webhook_url,
@@ -657,7 +758,6 @@ async def remove_webhook():
         )
         return "error: application not configured", 500
     try:
-        # We must initialize/shutdown here too!
         await application.initialize()
         await application.bot.delete_webhook(drop_pending_updates=True)
         await application.shutdown()
