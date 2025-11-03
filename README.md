@@ -16,125 +16,99 @@ Default: A warm, friendly, and natural-sounding companion.
 
 Google Gemini Integration: All conversational logic is powered by the gemini-2.5-flash-preview-09-2025 model for fast, high-quality, and context-aware responses.
 
+Persistent Database (MongoDB):
+
+Logs all unique users who interact with the bot.
+
+Manages a list of blocked users.
+
+Keeps track of all active group chats.
+
+Long-Term Chat Memory: Ananya remembers the context of your conversation. She loads the last 20 messages from your chat history (stored in MongoDB) to provide continuous and relevant replies.
+
 Advanced Chat Logic:
 
 Works seamlessly in both private chats and group chats.
 
 In groups, she only responds to @-mentions or direct replies, preventing spam.
 
-Persistent Database (MongoDB):
-
-Logs all unique users who interact with the bot.
-
-Saves user data (username, first name, last seen).
-
-Remembers which chats are active.
-
-Manages a "block list" for user moderation.
-
 Full Admin Panel:
 
 Protected by a hard-coded ADMIN_USER_ID.
 
-/admin_stats: Shows real-time bot statistics (total users, blocked users, active chats) queried directly from the database.
+/admin_stats: Shows live bot statistics (total users, blocked users, active chats).
 
-/block & /unblock: Allows the admin to ban or unban any user from the bot.
+/block <user_id>: Instantly blocks a user from interacting with the bot.
 
-/admin_get_prompt & /admin_set_prompt: Lets the admin view or even hot-reload a new personality prompt live without redeploying.
+/unblock <user_id>: Unblocks a user.
+
+/admin_get_prompt & /admin_set_prompt: Allows the admin to view or even hot-reload the bot's personality prompts live, without a redeploy.
 
 Real-Time News Command:
 
-Admin-only /news command.
+An admin-only /news [query] command.
 
-Uses Gemini's Google Search grounding to fetch and summarize real-time, verified news from the internet, complete with sources.
-
-Asynchronous & Scalable:
-
-Built with Flask and gunicorn to run as a reliable web server.
-
-Uses httpx for non-blocking asynchronous API calls to the Gemini API, preventing crashes under load.
+Uses Google Search grounding via the Gemini API to fetch, summarize, and cite real-time, verified news from the internet.
 
 🛠️ Tech Stack
 
-Language: Python 3.12
+Core: Python 3.11+
 
-AI Model: Google Gemini 2.5 Flash
+Web Server: Flask, Gunicorn
 
-Platform: Telegram Bot API
+Bot Framework: python-telegram-bot
 
-Hosting: Render (Free Web Service)
+AI: gemini-2.5-flash-preview-09-2025 via Google's Generative Language API
 
-Web Server: Flask & Gunicorn
+Database: MongoDB Atlas (accessed via pymongo)
 
-Database: MongoDB Atlas (Free M0 Cluster)
+API Calls: httpx (for stable, synchronous API calls)
 
-Core Libraries: python-telegram-bot, pymongo, httpx
+Hosting: Render (as a Web Service)
 
 🚀 Deployment Guide (on Render)
 
-This bot is designed to be deployed as a free Web Service on Render.
+This project is configured for deployment on Render's free tier.
 
-1. Get Your API Keys (The "Secrets")
+Step 1: Get All Secret Keys
 
-You will need four secret keys.
+You will need four secret keys. Store them in a safe place.
 
-TELEGRAM_BOT_TOKEN:
+TELEGRAM_BOT_TOKEN: Get this from @BotFather on Telegram.
 
-Talk to the @BotFather on Telegram.
+GEMINI_API_KEY: Get this from Google AI Studio.
 
-Create your bot and copy the API token.
+MONGODB_URI: Get this from MongoDB Atlas.
 
-GEMINI_API_KEY:
+Create a free M0 cluster.
 
-Go to Google AI Studio (Makersuite).
+Go to "Database Access" and create a user with a username and password.
 
-Create a new API key.
+Go to "Network Access" and add 0.0.0.0/0 ("Allow Access from Anywhere").
 
-MONGODB_URI:
+Go to "Database", click "Connect" -> "Drivers", and copy your connection string (URI). Replace <username> and <password> with your credentials.
 
-Create a free account on MongoDB Atlas.
+ADMIN_USER_ID: Get your numeric Telegram ID from @userinfobot.
 
-Build a new Free (M0) cluster.
+Step 2: Set Up GitHub
 
-IMPORTANT:
+Push the two project files to a new GitHub repository:
 
-Under Network Access, click "Add IP Address" and add 0.0.0.0/0 ("Allow Access from Anywhere").
+app.py
 
-Under Database Access, create a new database user (e.g., ananya_user) and set a password.
+requirements.txt
 
-Click "Connect" -> "Drivers" and copy your Connection String (URI).
+Step 3: Deploy on Render
 
-Paste the string and replace <username> and <password> with your database user's credentials.
+Sign up for Render.com (you can use your GitHub account).
 
-ADMIN_USER_ID:
+On your dashboard, click "New +" -> "Web Service".
 
-Talk to @userinfobot on Telegram.
+Connect your GitHub and select your bot's repository.
 
-It will instantly reply with your numeric Telegram ID.
-
-2. Set Up Your GitHub Repository
-
-Create a new, public GitHub repository (e.g., ananya-telegram-bot).
-
-Add the app.py file to this repository.
-
-Add the requirements.txt file to this repository.
-
-(Optional) Add this README.md file!
-
-3. Deploy on Render
-
-Sign up for a free account on Render.com (you can link your GitHub).
-
-On the Render Dashboard, click New + -> Web Service.
-
-Connect your GitHub and select your new bot repository.
-
-Fill in the settings:
+Fill in the service details:
 
 Name: ananya-bot (or your preferred name)
-
-Root Directory: (leave blank)
 
 Environment: Python 3
 
@@ -144,13 +118,15 @@ Start Command: gunicorn app:app
 
 Instance Type: Free
 
-Click "Create Web Service". Render will start its first build (it might fail, this is okay).
+Click "Create Web Service".
 
-4. Add Your Secrets (Environment Variables)
+Step 4: Add Environment Variables
 
-In your new Render service, go to the "Environment" tab.
+Your first build will likely fail. This is normal.
 
-Click "Add Environment Variable" and add all four of your secrets from Step 1:
+Go to the "Environment" tab for your new service.
+
+Click "Add Environment Variable" and add your four secret keys from Step 1:
 
 TELEGRAM_BOT_TOKEN
 
@@ -160,22 +136,44 @@ MONGODB_URI
 
 ADMIN_USER_ID
 
-Adding these will automatically trigger a new, successful deployment.
+Adding these will trigger a new deployment. Wait for it to finish and say "Live".
 
-5. Set the Webhook (Final Step)
+Step 5: Set the Webhook
 
-Wait for your Render deployment to say "Live".
+This is the final step to connect Telegram to your new server.
 
-At the top of the page, copy your new URL. It will look like:
-https://ananya-bot.onrender.com
+Copy your new Render URL from the top of the dashboard (e.g., https-ananyabot.onrender.com).
 
-Set the webhook manually. Open a new, empty browser tab and paste this URL, replacing the two placeholders:
+Get your TELEGRAM_BOT_TOKEN from Step 1.
 
-https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=<YOUR_RENDER_URL>/webhook
+Open a new browser tab and paste in the following URL, replacing the placeholders:
+
+[https://api.telegram.org/bot](https://api.telegram.org/bot)<YOUR_BOT_TOKEN>/setWebhook?url=<YOUR_RENDER_URL>/webhook
+
 
 Example:
-https://api.telegram.org/bot12345:ABC.../setWebhook?url=https://ananya-bot.onrender.com/webhook
 
-Press Enter. Your browser will show {"ok":true,"result":true,"description":"Webhook was set"}.
+[https://api.telegram.org/bot12345:ABCDE/setWebhook?url=https://ananyabot.onrender.com/webhook](https://api.telegram.org/bot12345:ABCDE/setWebhook?url=https://ananyabot.onrender.com/webhook)
 
-You are done. Your bot is now live, deployed, and ready to talk to users on Telegram.
+
+Press Enter. Your browser should show:
+{"ok":true,"result":true,"description":"Webhook was set"}
+
+Your bot is now live and will respond in Telegram!
+
+📜 License
+
+Copyright 2024, Aniket Singha Roy
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
