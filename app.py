@@ -3,15 +3,17 @@
 Ananya - Your Friendly Telegram Bot (Render Version)
 Powered by Google Gemini
 
-This version is designed for Render and uses:
-- Gunicorn + Flask: To run as a persistent web server.
-- MongoDB: As a persistent, serverless database.
-- httpx: For asynchronous API calls to Gemini (This fixes the crash).
+This is the final, corrected version. It includes:
+- Flask[async] for Render.
+- gunicorn as the server.
+- MongoDB for the database.
+- httpx for non-blocking API calls.
+- The FINAL fix for the 'Application.initialize()' error.
 """
 
 import logging
 import os
-import httpx  # <-- The correct, non-crashing library
+import httpx  # The async API call library
 import json
 import asyncio
 from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated
@@ -25,15 +27,14 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode, ChatType
 
-# --- Web Server Imports ---
+# --- Vercel-specific Imports ---
 from flask import Flask, request as flask_request
-import pymongo 
+import pymongo
 
 # --- CONFIGURATION (from Render Environment Variables) ---
-# We will set all 4 of these in the Render dashboard
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MONGODB_URI = os.environ.get("MONGODB_URI") 
+MONGODB_URI = os.environ.get("MONGODB_URI")
 
 try:
     ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID"))
@@ -60,7 +61,7 @@ PERSONALITIES = {
         "Talk about India's culture, history, and achievements with genuine enthusiasm. "
         "Your tone is positive, confident, and full of hope for the country's future. "
         "It's like talking to a friend who really loves their homeland."
-    )
+    ),
 }
 
 # --- LOGGING ---
@@ -73,8 +74,6 @@ logger = logging.getLogger(__name__)
 
 # --- MONGODB DATABASE SETUP ---
 try:
-    # We create the client, but we DO NOT test the connection here.
-    # This guarantees a fast startup.
     client = pymongo.MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
     db = client.ananya_bot
     users_col = db.users
@@ -89,8 +88,7 @@ except Exception as e:
     blocked_col = None
     chats_col = None
 
-# --- DATABASE FUNCTIONS ---
-
+# --- MONGODB DATABASE FUNCTIONS ---
 def is_db_connected():
     if (
         db is None
@@ -102,7 +100,6 @@ def is_db_connected():
         logger.error("Database client is not configured.")
         return False
     return True
-
 
 def log_user(user: Update.effective_user):
     if not user or not is_db_connected():
@@ -120,7 +117,6 @@ def log_user(user: Update.effective_user):
     except Exception as e:
         logger.error(f"Error in log_user: {e}")
 
-
 def is_user_blocked(user_id: int) -> bool:
     if is_admin(user_id) or not is_db_connected():
         return False
@@ -128,8 +124,7 @@ def is_user_blocked(user_id: int) -> bool:
         return blocked_col.find_one({"_id": user_id}) is not None
     except Exception as e:
         logger.error(f"Error in is_user_blocked: {e}")
-        return False  # Fail safe
-
+        return False
 
 def block_user(user_id_to_block: int) -> str:
     if not is_db_connected():
@@ -145,7 +140,6 @@ def block_user(user_id_to_block: int) -> str:
         logger.error(f"Error in block_user: {e}")
         return "An error occurred while blocking."
 
-
 def unblock_user(user_id_to_unblock: int) -> str:
     if not is_db_connected():
         return "Database error."
@@ -159,7 +153,6 @@ def unblock_user(user_id_to_unblock: int) -> str:
         logger.error(f"Error in unblock_user: {e}")
         return "An error occurred while unblocking."
 
-
 def update_active_chats(chat_id: int, action: str = "add"):
     if not is_db_connected():
         return
@@ -172,7 +165,6 @@ def update_active_chats(chat_id: int, action: str = "add"):
             chats_col.delete_one({"_id": chat_id})
     except Exception as e:
         logger.error(f"Error in update_active_chats: {e}")
-
 
 # --- ADMIN COMMAND HANDLERS ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +189,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <div><code>/admin_set_prompt &lt;name&gt; &lt;prompt_text&gt;</code> - Sets a new system prompt for a personality.</div>"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
-
 
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -236,7 +227,6 @@ async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /block <user_id>")
 
-
 async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text(
@@ -249,7 +239,6 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message)
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /unblock <user_id>")
-
 
 async def admin_get_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -270,7 +259,6 @@ async def admin_get_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except IndexError:
         await update.message.reply_text("Usage: /admin_get_prompt <name>")
-
 
 async def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -298,7 +286,6 @@ async def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Usage: /admin_set_prompt <name> <new_prompt_text>"
         )
 
-
 # --- PUBLIC COMMAND HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -323,7 +310,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text += "\n\nType /help to see all my commands and personalities!"
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
 
-
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user(user)
@@ -345,7 +331,6 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
-
 async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user(user)
@@ -361,7 +346,6 @@ async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("I don't recognize that personality.")
 
-
 async def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user(user)
@@ -369,7 +353,6 @@ async def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.chat_data["personality"] = "default"
     await update.message.reply_text("I'm back to my natural self!")
-
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -402,9 +385,7 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Sorry, I couldn't fetch the news right now. Please try again later."
         )
 
-
-# --- GEMINI API CALL (FIXED with httpx) ---
-# Create a global httpx.AsyncClient for connection pooling
+# --- GEMINI API CALL (Async Version) ---
 gemini_client = httpx.AsyncClient(timeout=60.0)
 
 async def get_gemini_response(
@@ -413,10 +394,6 @@ async def get_gemini_response(
     use_search: bool = False,
     chat_personality: str = "default",
 ) -> str:
-    """
-    Sends a prompt to the Gemini API using the asynchronous httpx client.
-    This is the CORRECT way to do this in an async framework.
-    """
     if not GEMINI_API_KEY:
         logger.error("GEMINI_API_KEY not set.")
         return "Sorry, my AI brain is not configured. (Admin: Check GEMINI_API_KEY)"
@@ -442,12 +419,9 @@ async def get_gemini_response(
     headers = {"Content-Type": "application/json"}
 
     try:
-        # Use the global async client to make the call
         response = await gemini_client.post(api_url, json=payload, headers=headers)
-        
-        response.raise_for_status()  # This will raise an error for 4xx/5xx responses
+        response.raise_for_status()
         result = response.json()
-
         text = (
             result.get("candidates", [{}])[0]
             .get("content", {})
@@ -478,7 +452,6 @@ async def get_gemini_response(
     except Exception as e:
         logger.error(f"Error processing Gemini response: {e}. Full response: {response.text if 'response' in locals() else 'N/A'}")
         return "Sorry, I encountered an unexpected error."
-
 
 # --- CORE MESSAGE HANDLER ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -512,7 +485,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Sorry, I had a little hiccup. Could you try that again?"
         )
 
-
 # --- CHAT MEMBER HANDLER ---
 async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.chat_member
@@ -528,14 +500,11 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Removed from chat: {chat_id}")
             update_active_chats(chat_id, "remove")
 
-
 # --- ADMIN HELPER ---
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
-
 # --- BOT & WEBHOOK INITIALIZATION ---
-# This code will now log the *exact* error if the token is invalid
 try:
     if TELEGRAM_BOT_TOKEN:
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -544,10 +513,8 @@ try:
         logger.error("FATAL: TELEGRAM_BOT_TOKEN is not set. Application not built.")
         application = None
 except Exception as e:
-    # This will log the "InvalidToken" error
     logger.error(f"FATAL: Failed to build Telegram application. ERROR: {e}")
     application = None
-
 
 # --- Register all handlers ---
 if application:
@@ -576,24 +543,19 @@ if application:
 else:
     logger.error("Application object is None, not registering handlers.")
 
-
 # --- FLASK APP FOR RENDER ---
 app = Flask(__name__)
-
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>", methods=["GET"])
 def health_check(path):
-    # This is the page you'll see when you visit your Render URL
     return "Hello! I am Ananya, and I am alive."
 
-
-# --- DEBUG ROUTE (This is your secret tool) ---
 @app.route("/admin_debug/<int:user_id>", methods=["GET"])
 def debug_vars(user_id):
     if not is_admin(user_id):
         return "Access denied.", 403
-
+    
     def get_key_preview(key):
         val = os.environ.get(key)
         if val is None:
@@ -608,7 +570,6 @@ def debug_vars(user_id):
     else:
         admin_check = f"<span style='color: green;'>Set (value: {admin_id})</span>"
 
-    # Check database
     db_check = (
         "<b>Database:</b> <span style='color: red;'>NOT CONNECTED (Check MONGODB_URI)</span>"
     )
@@ -631,28 +592,33 @@ def debug_vars(user_id):
         f"<p>{db_check}</p>"
     ), 200
 
-
+# --- THIS IS THE FINAL FIX ---
 @app.route("/webhook", methods=["POST"])
 async def webhook():
-    """This is the main endpoint that Telegram sends messages to."""
     if application is None:
         logger.error(
             "Webhook called, but application failed to build. Check TELEGRAM_BOT_TOKEN."
         )
         return "error: application not configured", 500
     try:
+        # 1. INITIALIZE the bot for this request
+        await application.initialize()
+        
+        # 2. Process the update
         update_json = flask_request.get_json()
         update = Update.de_json(update_json, application.bot)
         await application.process_update(update)
+        
+        # 3. SHUT DOWN the bot for this request
+        await application.shutdown()
+        
         return "ok", 200
     except Exception as e:
         logger.error(f"Error in webhook: {e}")
         return "error", 500
 
-
 @app.route("/set_webhook", methods=["GET"])
 async def set_webhook():
-    """A helper route to set the webhook (can also be done manually)."""
     if application is None:
         logger.error(
             "set_webhook called, but application failed to build. Check TELEGRAM_BOT_TOKEN."
@@ -666,30 +632,36 @@ async def set_webhook():
         return "Could not determine host URL.", 500
 
     host = flask_request.headers.get("x-forwarded-host", host)
-
     webhook_url = f"https://{host}/webhook"
 
     try:
-        # We will set the commands manually one time.
-        # await application.bot.set_my_commands(...)
-        
+        # We must initialize/shutdown here too!
+        await application.initialize()
         await application.bot.set_webhook(
             url=webhook_url,
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
         )
+        await application.shutdown()
+        
         return f"Webhook successfully set to: {webhook_url}", 200
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
         return f"Failed to set webhook: {e}", 500
 
-
 @app.route("/remove_webhook", methods=["GET"])
 async def remove_webhook():
     if application is None:
+        logger.error(
+            "remove_webhook called, but application failed to build. Check TELEGRAM_BOT_TOKEN."
+        )
         return "error: application not configured", 500
     try:
+        # We must initialize/shutdown here too!
+        await application.initialize()
         await application.bot.delete_webhook(drop_pending_updates=True)
+        await application.shutdown()
+        
         return "Webhook successfully removed.", 200
     except Exception as e:
         logger.error(f"Failed to remove webhook: {e}")
