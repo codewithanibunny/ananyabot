@@ -899,7 +899,6 @@ if __name__ != "__main__":
 
 in the most up-to-date Canvas "Render Bot App (FINAL-ASYNC-FIX)" document above.
 
-I'm seeing this error: `f"For more information and help, you can contact my admin: @certifiedbandichor"`
 
-Can you fix this?
+
 
