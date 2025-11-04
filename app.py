@@ -9,7 +9,7 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - MongoDB for the database.
 - requests for simple, blocking API calls.
 - The FINAL asyncio.run() fix for the "Application.initialize" errors.
-- Image recognition (vision) support.
+- Image recognition (vision) support. (NOW FIXED)
 - Voice note handling (replies in text).
 - Admin-only broadcast feature.
 """
@@ -746,9 +746,12 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Get the largest photo
         photo_file = await update.message.photo[-1].get_file()
         
-        # Download as bytes
+        # --- THIS IS THE FIX ---
+        # Download as bytes to memory
         file_bytes_io = io.BytesIO()
-        await photo_file.download(out=file_bytes_io)
+        await photo_file.download_to_memory(out=file_bytes_io)
+        # --- END OF FIX ---
+
         file_bytes_io.seek(0)
         image_bytes = file_bytes_io.read()
         
