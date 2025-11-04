@@ -12,6 +12,7 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - Image recognition (vision) support. (NOW FIXED)
 - Voice note handling (replies in text).
 - Admin-only broadcast feature.
+- NEW: Admin-only TTS (Text-to-Speech) command.
 """
 
 import logging
@@ -21,6 +22,8 @@ import json
 import asyncio  # <-- THE NEW FIX IS HERE
 import base64   # <-- NEW FOR IMAGES
 import io       # <-- NEW FOR IMAGES
+import wave     # <-- NEW FOR TTS
+import struct   # <-- NEW FOR TTS
 from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated
 from telegram.ext import (
     Application,
@@ -246,7 +249,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Content Management:</b>\n"
         "• <code>/news [query]</code> - Fetches verified news. \n"
         "• <code>/broadcast &lt;text&gt;</code> - Sends text to all users.\n"
-        "• <code>/broadcast</code> (as caption) - Sends a photo and caption to all users.\n\n"
+        "• <code>/broadcast</code> (as caption) - Sends a photo and caption to all users.\n"
+        "• <code>/say &lt;text&gt;</code> - <b>NEW:</b> Generates a .wav audio file of Ananya speaking.\n\n"
         "<b>Personality Management:</b>\n"
         "• <code>/admin_get_prompt &lt;name&gt;</code> - Shows prompt for 'default', 'spiritual', or 'nationalist'.\n"
         "• <code>/admin_set_prompt &lt;name&gt; &lt;text&gt;</code> - Sets a new prompt for a personality."
@@ -445,6 +449,106 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Failed for: {failure_count} users",
         parse_mode=ParseMode.HTML
     )
+
+# --- NEW: TTS (TEXT-TO-SPEECH) COMMAND ---
+
+def generate_voice_response(text_to_speak: str) -> bytes:
+    """Calls Gemini TTS API and returns the raw PCM audio data."""
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY not set.")
+        return b"" # Return empty bytes
+
+    api_url = f"https{os.environ.get('GEMINI_API_URL', '://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent')}?key={GEMINI_API_KEY}"
+
+    # We can control the voice style in the prompt
+    prompt = f"Say this in a friendly, female, Hinglish voice: {text_to_speak}"
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    # "Kore" is a good, clear female-sounding voice
+                    "prebuiltVoiceConfig": {"voiceName": "Kore"} 
+                }
+            }
+        },
+        "model": "gemini-2.5-flash-preview-tts"
+    }
+    
+    headers = {"Content-Type": "application/json"}
+
+    try:
+        response = requests.post(api_url, json=payload, headers=headers, timeout=20)
+        response.raise_for_status()
+        result = response.json()
+        
+        audio_data = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("inlineData", {}).get("data", "")
+        
+        if not audio_data:
+            logger.error("Gemini TTS returned no audio data.")
+            return b""
+            
+        return base64.b64decode(audio_data)
+
+    except Exception as e:
+        logger.error(f"Error in generate_voice_response: {e}")
+        return b""
+
+def pcm_to_wav(pcm_data: bytes) -> io.BytesIO:
+    """
+    Safely packages raw 16-bit 24kHz PCM data into a .wav file in memory.
+    This requires NO external libraries (like ffmpeg).
+    """
+    if not pcm_data:
+        return None
+
+    wav_buffer = io.BytesIO()
+    
+    # Use the 'wave' standard library to write the WAV header correctly
+    with wave.open(wav_buffer, 'wb') as wf:
+        wf.setnchannels(1)       # Mono
+        wf.setsampwidth(2)       # 16-bit (2 bytes)
+        wf.setframerate(24000)   # 24kHz (Gemini TTS default)
+        wf.writeframes(pcm_data) # Write the raw audio data
+        
+    wav_buffer.seek(0) # Rewind the buffer to the beginning
+    return wav_buffer
+
+
+async def admin_say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only command to test Text-to-Speech."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("You do not have permission to use this command.")
+        return
+
+    text_to_speak = " ".join(context.args)
+    if not text_to_speak:
+        await update.message.reply_text("Usage: /say <text to speak>")
+        return
+
+    await update.message.chat.send_action(action="typing")
+
+    try:
+        # 1. Generate the raw PCM audio from Gemini
+        pcm_data = generate_voice_response(text_to_speak) # Sync function
+        if not pcm_data:
+            await update.message.reply_text("Sorry, I couldn't generate the audio.")
+            return
+
+        # 2. Package the PCM data into a .wav file
+        wav_file = pcm_to_wav(pcm_data) # Sync function
+        if not wav_file:
+            await update.message.reply_text("Sorry, I couldn't package the audio file.")
+            return
+
+        # 3. Send the .wav file as an audio document
+        await update.message.reply_audio(audio=wav_file, title="ananya_reply.wav", filename="ananya_reply.wav")
+
+    except Exception as e:
+        logger.error(f"Error in /say command: {e}")
+        await update.message.reply_text("An error occurred while generating the audio.")
 
 
 # --- PUBLIC COMMAND HANDLERS ---
@@ -871,6 +975,9 @@ def get_application():
                     application.add_handler(CommandHandler("broadcast", broadcast_command))
                     application.add_handler(MessageHandler(filters.PHOTO & filters.Caption(("/broadcast")), broadcast_command))
                     
+                    # --- NEW: TTS Handler ---
+                    application.add_handler(CommandHandler("say", admin_say_command))
+                    
                     # Public
                     application.add_handler(CommandHandler("start", start))
                     application.add_handler(CommandHandler("help", show_help))
@@ -1092,5 +1199,4 @@ if __name__ != "__main__":
     # This block runs when Gunicorn starts the app
     # We need to initialize the application and its handlers
     get_application()
-
 
