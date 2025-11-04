@@ -12,7 +12,7 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - Image recognition (vision) support. (NOW FIXED)
 - Voice note handling (replies in text).
 - Admin-only broadcast feature.
-- NEW: Admin-only TTS (Text-to-Speech) command.
+- NEW: Public TTS (Text-to-Speech) command.
 """
 
 import logging
@@ -249,8 +249,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Content Management:</b>\n"
         "• <code>/news [query]</code> - Fetches verified news. \n"
         "• <code>/broadcast &lt;text&gt;</code> - Sends text to all users.\n"
-        "• <code>/broadcast</code> (as caption) - Sends a photo and caption to all users.\n"
-        "• <code>/say &lt;text&gt;</code> - <b>NEW:</b> Generates a .wav audio file of Ananya speaking.\n\n"
+        "• <code>/broadcast</code> (as caption) - Sends a photo and caption to all users.\n\n"
         "<b>Personality Management:</b>\n"
         "• <code>/admin_get_prompt &lt;name&gt;</code> - Shows prompt for 'default', 'spiritual', or 'nationalist'.\n"
         "• <code>/admin_set_prompt &lt;name&gt; &lt;text&gt;</code> - Sets a new prompt for a personality."
@@ -517,10 +516,11 @@ def pcm_to_wav(pcm_data: bytes) -> io.BytesIO:
     return wav_buffer
 
 
-async def admin_say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only command to test Text-to-Speech."""
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("You do not have permission to use this command.")
+async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Public command to generate Text-to-Speech."""
+    user = update.effective_user
+    log_user(user) # Log the user
+    if is_user_blocked(user.id): # Check if blocked
         return
 
     text_to_speak = " ".join(context.args)
@@ -591,7 +591,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Public Commands:</b>\n"
         "<code>/start</code> - Welcome message.\n"
         "<code>/help</code> - Shows this help panel.\n"
-        "<code>/reset</code> - Resets me to my default friendly personality.\n\n"
+        "<code>/reset</code> - Resets me to my default friendly personality.\n"
+        "<code>/say &lt;text&gt;</code> - <b>NEW:</b> I will speak the text back to you!\n\n"
         "<b>Personalities:</b>\n"
         "<code>/spiritual</code> - I become a spiritual guide based on Hindu granths.\n"
         "<code>/nationalist</code> - I become a proud, patriotic Indian.\n\n"
@@ -975,8 +976,8 @@ def get_application():
                     application.add_handler(CommandHandler("broadcast", broadcast_command))
                     application.add_handler(MessageHandler(filters.PHOTO & filters.Caption(("/broadcast")), broadcast_command))
                     
-                    # --- NEW: TTS Handler ---
-                    application.add_handler(CommandHandler("say", admin_say_command))
+                    # --- NEW: TTS Handler (Now Public) ---
+                    application.add_handler(CommandHandler("say", say_command))
                     
                     # Public
                     application.add_handler(CommandHandler("start", start))
