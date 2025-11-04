@@ -3,13 +3,14 @@
 Ananya - Your Friendly Telegram Bot (Render Version)
 Powered by Google Gemini
 
-This is the final, stable, SYNCHRONOUS version. It includes:
+This version is stable and SYNCHRONOUS. It includes:
 - Flask for Render.
 - gunicorn as the server.
 - MongoDB for the database.
 - requests for simple, blocking API calls.
-- The fix for the /help command (removed <div> tags).
-- The FINAL asyncio.run() fix for the "Queue.put" AND "Application.initialize" errors.
+- The FINAL asyncio.run() fix for the "Application.initialize" errors.
+- NEW: Image recognition (vision) support.
+- NEW: Voice note handling.
 """
 
 import logging
@@ -17,6 +18,8 @@ import os
 import requests  # <-- The stable, synchronous library
 import json
 import asyncio  # <-- THE NEW FIX IS HERE
+import base64   # <-- NEW FOR IMAGES
+import io       # <-- NEW FOR IMAGES
 from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated
 from telegram.ext import (
     Application,
@@ -419,7 +422,7 @@ def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Personalities:</b>\n"
         "<code>/spiritual</code> - I become a spiritual guide based on Hindu granths.\n"
         "<code>/nationalist</code> - I become a proud, patriotic Indian.\n\n"
-        f"For more information and help, you can contact my admin: @certifiedbandichor"
+        f"For more information and help, you can contact my admin: Give me user name {ADMIN_USER_ID}</a>"
     )
     # --- END OF FIX ---
 
@@ -511,17 +514,19 @@ def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# --- GEMINI API CALL (Synchronous Version with History) ---
+# --- GEMINI API CALL (Synchronous Version with History & Vision) ---
 def get_gemini_response(
     prompt: str,
     chat_history: list,
     system_prompt_override: str = None,
     use_search: bool = False,
     chat_personality: str = "default",
+    image_data_base64: str = None,
+    image_mime_type: str = "image/jpeg",
 ) -> str:
     """
     Sends a prompt to the Gemini API using the synchronous requests client.
-    Now includes chat history.
+    Now includes chat history AND image data.
     """
     if not GEMINI_API_KEY:
         logger.error("GEMINI_API_KEY not set.")
@@ -534,9 +539,19 @@ def get_gemini_response(
     else:
         system_prompt = PERSONALITIES.get(chat_personality, PERSONALITIES["default"])
 
+    # Build the parts for the last user message
+    user_parts = []
+    # Prompt text *always* comes first
+    if prompt:
+        user_parts.append({"text": prompt})
+    # Then append the image
+    if image_data_base64:
+        user_parts.append(
+            {"inlineData": {"mimeType": image_mime_type, "data": image_data_base64}}
+        )
+
     # Build the full conversation history
-    # The history from DB is already in the correct format: [{"role": "user", "parts": [...]}, {"role": "model", "parts": [...]}]
-    conversation_history = chat_history + [{"role": "user", "parts": [{"text": prompt}]}]
+    conversation_history = chat_history + [{"role": "user", "parts": user_parts}]
 
     payload = {
         "contents": conversation_history,  # Send the whole conversation
@@ -603,7 +618,11 @@ def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     prompt = update.message.text
     if not prompt:
-        return
+        # This will allow the handler to process messages with only images/captions
+        # But we must ensure it's not a voice or photo, which are handled separately
+        if update.message.voice or update.message.photo:
+            return
+        prompt = "" # Set a default empty prompt if text is None
 
     is_group = chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]
     if is_group:
@@ -617,7 +636,8 @@ def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_mention:
             prompt = prompt.replace(f"@{context.bot.username}", "").strip()
 
-    if not prompt:  # Check again in case the prompt was *only* a mention
+    if not prompt and not (update.message.photo or update.message.voice):
+        # If there's still no prompt and it's not a media type we handle, exit.
         return
 
     personality = context.chat_data.get("personality", "default")
@@ -647,6 +667,87 @@ def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             text="Sorry, I had a little hiccup. Could you try that again?",
         )
+
+# --- NEW: IMAGE HANDLER ---
+def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    chat_id = chat.id
+
+    log_user(user)
+    if is_user_blocked(user.id):
+        return
+    
+    context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    try:
+        # Get the largest photo
+        photo_file = update.message.photo[-1].get_file()
+        
+        # Download as bytes
+        file_bytes_io = io.BytesIO()
+        photo_file.download(out=file_bytes_io)
+        file_bytes_io.seek(0)
+        image_bytes = file_bytes_io.read()
+        
+        # Convert to base64
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Get the user's caption, if any
+        prompt = update.message.caption
+        if not prompt:
+            prompt = "Please describe this image in a friendly and conversational way. Be brief unless the image is complex."
+        
+        # Get chat history (it's good for context, e.g., "what is this?")
+        chat_history = get_chat_history(chat_id)
+        
+        # Call Gemini with the image data
+        response_text = get_gemini_response(
+            prompt,
+            chat_history=chat_history,
+            image_data_base64=image_base64,
+            image_mime_type="image/jpeg" # Assuming most Telegram photos are jpeg
+        )
+
+        # Send response
+        context.bot.send_message(chat_id=chat_id, text=response_text, reply_to_message_id=update.message.message_id)
+
+        # Update history
+        history_prompt = f"[User sent an image with caption: {prompt}]"
+        chat_history.append({"role": "user", "parts": [{"text": history_prompt}]})
+        chat_history.append({"role": "model", "parts": [{"text": response_text}]})
+        save_chat_history(chat_id, chat_history)
+
+    except Exception as e:
+        logger.error(f"Error in handle_image_message: {e}")
+        context.bot.send_message(
+            chat_id=chat_id,
+            text="Sorry, I had trouble seeing that image. Could you try again?",
+        )
+
+# --- NEW: VOICE HANDLER ---
+def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    chat_id = chat.id
+
+    log_user(user)
+    if is_user_blocked(user.id):
+        return
+
+    # User-requested Hinglish reply
+    reply_text = "Arre waah, voice note! Cool. Main abhi voice notes sun nahi sakti, kyunki mere paas kaan nahi hain! 😅 \nAap type karke bataoge toh main pakka reply karungi!"
+    
+    context.bot.send_message(chat_id=chat_id, text=reply_text, reply_to_message_id=update.message.message_id)
+    
+    # We can log that a voice note was sent, but we can't log its content
+    try:
+        chat_history = get_chat_history(chat_id)
+        chat_history.append({"role": "user", "parts": [{"text": "[User sent a voice note]"}]})
+        chat_history.append({"role": "model", "parts": [{"text": reply_text}]})
+        save_chat_history(chat_id, chat_history)
+    except Exception as e:
+        logger.error(f"Error saving voice note history: {e}")
 
 
 # --- CHAT MEMBER HANDLER ---
@@ -710,7 +811,18 @@ def get_application():
                     application.add_handler(
                         CommandHandler("nationalist", set_personality)
                     )
-                    # Message
+                    
+                    # --- NEW HANDLERS ---
+                    # Add image and voice handlers *before* the general text handler
+                    application.add_handler(
+                        MessageHandler(filters.PHOTO, handle_image_message)
+                    )
+                    application.add_handler(
+                        MessageHandler(filters.VOICE, handle_voice_message)
+                    )
+                    # --- END NEW HANDLERS ---
+
+                    # Message (must be last)
                     application.add_handler(
                         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
                     )
@@ -806,9 +918,13 @@ def webhook():
         update = Update.de_json(update_json, application.bot)
         
         # --- THE FIX ---
-        # Run the async process_update in its own event loop
-        # This resolves the "coroutine 'Queue.put' was never awaited" error
-        asyncio.run(application.process_update(update))
+        # We must initialize the app *before* processing the update
+        async def process_update_async():
+            await application.initialize()
+            await application.process_update(update)
+            await application.shutdown()
+
+        asyncio.run(process_update_async())
         # --- END OF FIX ---
 
         return "ok", 200
@@ -834,7 +950,17 @@ def set_webhook():
         return "Could not determine host URL.", 500
 
     host = flask_request.headers.get("x-forwarded-host", host)
-    webhook_url = f"https{os.environ.get('RENDER_EXTERNAL_URL', '://' + host)}/webhook" # Render is always https
+    
+    # --- WEBHOOK URL FIX ---
+    # Check if Render provides its external URL, otherwise build it
+    render_url = os.environ.get('RENDER_EXTERNAL_URL')
+    if render_url:
+        # RENDER_EXTERNAL_URL already includes https://
+        webhook_url = f"{render_url}/webhook"
+    else:
+        # Build it manually, ensuring no double "://"
+        webhook_url = f"https://{host}/webhook"
+    # --- END WEBHOOK URL FIX ---
 
     try:
         # --- THE FIX ---
@@ -889,16 +1015,11 @@ def remove_webhook():
         
         return "Webhook successfully removed.", 200
     except Exception as e:
-        logger.error(f"Failed to remove webhook: {e}")
+        logger.error(f"Failed to set webhook: {e}")
         return f"Failed to remove webhook: {e}", 500
 
 if __name__ != "__main__":
     # This block runs when Gunicorn starts the app
     # We need to initialize the application and its handlers
     get_application()
-
-in the most up-to-date Canvas "Render Bot App (FINAL-ASYNC-FIX)" document above.
-
-
-
 
