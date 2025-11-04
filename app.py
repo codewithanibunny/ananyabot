@@ -491,7 +491,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Personalities:</b>\n"
         "<code>/spiritual</code> - I become a spiritual guide based on Hindu granths.\n"
         "<code>/nationalist</code> - I become a proud, patriotic Indian.\n\n"
-        f"For more information and help, you can contact my admin: <code>{ADMIN_USER_ID}</code>"
+        f"For more information and help, you can contact my admin: @certifiedbandichor"
     )
 
     try:
@@ -1092,4 +1092,5 @@ if __name__ != "__main__":
     # This block runs when Gunicorn starts the app
     # We need to initialize the application and its handlers
     get_application()
+
 
