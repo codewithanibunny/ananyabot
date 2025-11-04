@@ -3,14 +3,15 @@
 Ananya - Your Friendly Telegram Bot (Render Version)
 Powered by Google Gemini
 
-This version is stable and SYNCHRONOUS. It includes:
+This is the final, stable, SYNCHRONOUS version. It includes:
 - Flask for Render.
 - gunicorn as the server.
 - MongoDB for the database.
 - requests for simple, blocking API calls.
 - The FINAL asyncio.run() fix for the "Application.initialize" errors.
-- NEW: Image recognition (vision) support.
-- NEW: Voice note handling.
+- Image recognition (vision) support.
+- Voice note handling (replies in text).
+- Admin-only broadcast feature.
 """
 
 import logging
@@ -30,6 +31,7 @@ from telegram.ext import (
     ChatMemberHandler,
 )
 from telegram.constants import ParseMode, ChatType
+from telegram.error import Forbidden, BadRequest # <-- NEW for broadcast
 
 # --- Flask App for Render ---
 from flask import Flask, request as flask_request
@@ -73,7 +75,9 @@ PERSONALITIES = {
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+# Silence chatty libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -121,6 +125,10 @@ def log_user(user: Update.effective_user):
         return
     try:
         user_id_str = str(user.id)
+        # We only want to log users, not chats (which can also be an 'user' object)
+        if user.id < 0: # User IDs are positive, chat IDs are negative
+            return
+            
         update_data = {
             "$set": {
                 "username": user.username,
@@ -137,7 +145,7 @@ def is_user_blocked(user_id: int) -> bool:
     if is_admin(user_id) or not is_db_connected():
         return False
     try:
-        return blocked_col.find_one({"_id": user_id}) is not None
+        return blocked_col.find_one({"_id": str(user_id)}) is not None
     except Exception as e:
         logger.error(f"Error in is_user_blocked: {e}")
         return False
@@ -150,7 +158,7 @@ def block_user(user_id_to_block: int) -> str:
         return "Cannot block the admin."
     try:
         blocked_col.update_one(
-            {"_id": user_id_to_block}, {"$set": {"blocked": True}}, upsert=True
+            {"_id": str(user_id_to_block)}, {"$set": {"blocked": True}}, upsert=True
         )
         return f"User {user_id_to_block} has been blocked."
     except Exception as e:
@@ -162,7 +170,7 @@ def unblock_user(user_id_to_unblock: int) -> str:
     if not is_db_connected():
         return "Database error."
     try:
-        result = blocked_col.delete_one({"_id": user_id_to_unblock})
+        result = blocked_col.delete_one({"_id": str(user_id_to_unblock)})
         if result.deleted_count > 0:
             return f"User {user_id_to_unblock} has been unblocked."
         else:
@@ -220,12 +228,11 @@ def save_chat_history(chat_id: int, history: list):
         logger.error(f"Error saving chat history: {e}")
 
 
-# --- ADMIN COMMAND HANDLERS ---
-def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- ADMIN COMMAND HANDLERS (NOW ASYNC) ---
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command.",
+        await update.message.reply_text(
+            "You do not have permission to use this command."
         )
         return
     help_text = (
@@ -236,29 +243,25 @@ def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/unblock &lt;user_id&gt;</code> - Unblocks a user.\n\n"
         "<b>Bot Stats:</b>\n"
         "• <code>/admin_stats</code> - Shows usage statistics.\n\n"
-        "<b>News Command (Admin-Only):</b>\n"
+        "<b>Content Management:</b>\n"
         "• <code>/news [query]</code> - Fetches verified news. \n"
-        "  (e.g., <code>/news</code>, <code>/news international</code>)\n\n"
+        "• <code>/broadcast &lt;text&gt;</code> - Sends text to all users.\n"
+        "• <code>/broadcast</code> (as caption) - Sends a photo and caption to all users.\n\n"
         "<b>Personality Management:</b>\n"
-        "• <code>/admin_get_prompt &lt;name&gt;</code> - Shows the system prompt for 'default', 'spiritual', or 'nationalist'.\n"
-        "• <code>/admin_set_prompt &lt;name&gt; &lt;prompt_text&gt;</code> - Sets a new system prompt for a personality."
+        "• <code>/admin_get_prompt &lt;name&gt;</code> - Shows prompt for 'default', 'spiritual', or 'nationalist'.\n"
+        "• <code>/admin_set_prompt &lt;name&gt; &lt;text&gt;</code> - Sets a new prompt for a personality."
     )
-    context.bot.send_message(
-        chat_id=update.effective_chat.id, text=help_text, parse_mode=ParseMode.HTML
-    )
+    await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
 
-def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command.",
+        await update.message.reply_text(
+            "You do not have permission to use this command."
         )
         return
     if not is_db_connected():
-        context.bot.send_message(
-            chat_id=update.effective_chat.id, text="Error: Database is not connected."
-        )
+        await update.message.reply_text("Error: Database is not connected.")
         return
     try:
         total_users = users_col.count_documents({})
@@ -270,119 +273,189 @@ def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• <b>Total Blocked Users:</b> {total_blocked}\n"
             f"• <b>Total Active Chats (Groups + Private):</b> {total_chats}"
         )
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=stats_text,
-            parse_mode=ParseMode.HTML,
-        )
+        await update.message.reply_text(stats_text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Error in admin_stats_command: {e}")
-        context.bot.send_message(
-            chat_id=update.effective_chat.id, text="Error fetching stats."
-        )
+        await update.message.reply_text("Error fetching stats.")
 
 
-def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command.",
+        await update.message.reply_text(
+            "You do not have permission to use this command."
         )
         return
     try:
         user_id_to_block = int(context.args[0])
-        message = block_user(user_id_to_block)
-        context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+        message = block_user(user_id_to_block) # This is a sync function, no await needed
+        await update.message.reply_text(message)
     except (IndexError, ValueError):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id, text="Usage: /block <user_id>"
-        )
+        await update.message.reply_text("Usage: /block <user_id>")
 
 
-def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command.",
+        await update.message.reply_text(
+            "You do not have permission to use this command."
         )
         return
     try:
         user_id_to_unblock = int(context.args[0])
-        message = unblock_user(user_id_to_unblock)
-        context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+        message = unblock_user(user_id_to_unblock) # This is a sync function, no await needed
+        await update.message.reply_text(message)
     except (IndexError, ValueError):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id, text="Usage: /unblock <user_id>"
-        )
+        await update.message.reply_text("Usage: /unblock <user_id>")
 
 
-def admin_get_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_get_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command.",
+        await update.message.reply_text(
+            "You do not have permission to use this command."
         )
         return
     try:
         personality_name = context.args[0].lower()
         if personality_name in PERSONALITIES:
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"<b>Prompt for '{personality_name}':</b>\n\n{PERSONALITIES[personality_name]}",
+            await update.message.reply_text(
+                f"<b>Prompt for '{personality_name}':</b>\n\n{PERSONALITIES[personality_name]}",
                 parse_mode=ParseMode.HTML,
             )
         else:
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Personality not found. Use 'default', 'spiritual', or 'nationalist'.",
+            await update.message.reply_text(
+                "Personality not found. Use 'default', 'spiritual', or 'nationalist'."
             )
     except IndexError:
-        context.bot.send_message(
-            chat_id=update.effective_chat.id, text="Usage: /admin_get_prompt <name>"
-        )
+        await update.message.reply_text("Usage: /admin_get_prompt <name>")
 
 
-def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="You do not have permission to use this command.",
+        await update.message.reply_text(
+            "You do not have permission to use this command."
         )
         return
     try:
         personality_name = context.args[0].lower()
         if personality_name not in PERSONALITIES:
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Personality not found. Use 'default', 'spiritual', or 'nationalist'.",
+            await update.message.reply_text(
+                "Personality not found. Use 'default', 'spiritual', or 'nationalist'."
             )
             return
         new_prompt = " ".join(context.args[1:])
         if not new_prompt:
-            context.bot.send_message(
-                chat_id=update.effective_chat.id, text="Error: Prompt cannot be empty."
-            )
+            await update.message.reply_text("Error: Prompt cannot be empty.")
             return
         PERSONALITIES[personality_name] = new_prompt
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"Successfully updated prompt for '{personality_name}'.",
+        await update.message.reply_text(
+            f"Successfully updated prompt for '{personality_name}'."
         )
     except IndexError:
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Usage: /admin_set_prompt <name> <new_prompt_text>",
+        await update.message.reply_text(
+            "Usage: /admin_set_prompt <name> <new_prompt_text>"
         )
+
+
+# --- NEW: BROADCAST COMMANDS ---
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles text and image broadcasts from the admin."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("You do not have permission to use this command.")
+        return
+
+    if not is_db_connected():
+        await update.message.reply_text("Database not connected. Cannot fetch user list.")
+        return
+
+    text_to_send = None
+    photo_to_send = None
+    caption_to_send = None
+
+    # Case 1: Text broadcast
+    # /broadcast Hello world
+    if update.message.text:
+        text_to_send = " ".join(context.args)
+        if not text_to_send:
+            await update.message.reply_text("Usage: /broadcast <text to send>\nOr send an image with /broadcast in the caption.")
+            return
+    
+    # Case 2: Image broadcast
+    # Admin sends a photo with the caption "/broadcast New update!"
+    elif update.message.photo:
+        photo_to_send = update.message.photo[-1].file_id
+        if update.message.caption:
+             # Remove the "/broadcast" part from the caption
+            caption_to_send = " ".join(update.message.caption.split(' ')[1:])
+        if not caption_to_send:
+            caption_to_send = None # Send image with no caption if none provided
+    
+    else:
+        await update.message.reply_text("I can only broadcast text or a photo with a caption.")
+        return
+
+    # Fetch all user IDs from the database
+    try:
+        user_cursor = users_col.find({}, {"_id": 1})
+        user_ids = [doc["_id"] for doc in user_cursor]
+        total_users = len(user_ids)
+    except Exception as e:
+        logger.error(f"Failed to fetch user list for broadcast: {e}")
+        await update.message.reply_text(f"Failed to fetch user list: {e}")
+        return
+
+    await update.message.reply_text(f"Starting broadcast to {total_users} users... This may take a while.")
+
+    success_count = 0
+    failure_count = 0
+
+    for user_id_str in user_ids:
+        try:
+            user_id = int(user_id_str) # Convert string ID from DB to int
+            if user_id == ADMIN_USER_ID:
+                success_count += 1 # Skip admin, but count as "success"
+                continue
+
+            if text_to_send:
+                await context.bot.send_message(chat_id=user_id, text=text_to_send)
+            elif photo_to_send:
+                await context.bot.send_photo(chat_id=user_id, photo=photo_to_send, caption=caption_to_send)
+            
+            success_count += 1
+        
+        except Forbidden:
+            logger.warning(f"Broadcast failed for user {user_id}: Bot was blocked.")
+            failure_count += 1
+        except BadRequest as e:
+            if "chat not found" in str(e).lower():
+                logger.warning(f"Broadcast failed for user {user_id}: Chat not found.")
+                failure_count += 1
+            else:
+                logger.error(f"Broadcast failed for user {user_id}: {e}")
+                failure_count += 1
+        except Exception as e:
+            logger.error(f"Broadcast failed for user {user_id}: {e}")
+            failure_count += 1
+        
+        # Be nice to Telegram's API to avoid rate limits
+        await asyncio.sleep(0.1) 
+
+    await update.message.reply_text(
+        f"<b>Broadcast Complete!</b>\n"
+        f"• Sent to: {success_count} users (including admin)\n"
+        f"• Failed for: {failure_count} users",
+        parse_mode=ParseMode.HTML
+    )
 
 
 # --- PUBLIC COMMAND HANDLERS ---
-def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    log_user(user)
-    if is_user_blocked(user.id):
+    log_user(user) # Sync function
+    if is_user_blocked(user.id): # Sync function
         return
     context.chat_data.setdefault("personality", "default")
-    update_active_chats(update.effective_chat.id, "add")
+    update_active_chats(update.effective_chat.id, "add") # Sync function
+    
     welcome_text = (
         f"Hi {user.first_name}! I'm Ananya, your friendly AI assistant. 🇮🇳\n\n"
         "I'm here to chat, answer questions, and help you out. "
@@ -397,19 +470,15 @@ def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"To talk to me in this group, please @-mention me (e.g., @{context.bot.username}) or reply to my messages."
         )
     welcome_text += "\n\nType /help to see all my commands and personalities!"
-    context.bot.send_message(
-        chat_id=update.effective_chat.id, text=welcome_text, parse_mode=ParseMode.HTML
-    )
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
 
 
-def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    log_user(user)
-    if is_user_blocked(user.id):
+    log_user(user) # Sync function
+    if is_user_blocked(user.id): # Sync function
         return
 
-    # --- THIS IS THE FIX ---
-    # Removed the <div> tags which are not supported by Telegram's HTML parser
     help_text = (
         "<b>How I Work</b>\n"
         "I am a multi-personality AI bot! You can change my personality at any time.\n\n"
@@ -422,66 +491,55 @@ def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Personalities:</b>\n"
         "<code>/spiritual</code> - I become a spiritual guide based on Hindu granths.\n"
         "<code>/nationalist</code> - I become a proud, patriotic Indian.\n\n"
-        f"For more information and help, you can contact my admin: Give me user name {ADMIN_USER_ID}</a>"
+        f"For more information and help, you can contact my admin: <code>{ADMIN_USER_ID}</code>"
     )
-    # --- END OF FIX ---
 
     try:
-        context.bot.send_message(
-            chat_id=update.effective_chat.id, text=help_text, parse_mode=ParseMode.HTML
-        )
+        await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Error in /help command: {e}")
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="There was an error showing the help message.",
+        await update.message.reply_text(
+            "There was an error showing the help message.",
         )
 
 
-def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    log_user(user)
-    if is_user_blocked(user.id):
+    log_user(user) # Sync function
+    if is_user_blocked(user.id): # Sync function
         return
     command = update.message.text.split("@")[0][1:].lower()
     if command in PERSONALITIES:
         context.chat_data["personality"] = command
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"I am now in <b>{command}</b> mode. How can I help?",
+        await update.message.reply_text(
+            f"I am now in <b>{command}</b> mode. How can I help?",
             parse_mode=ParseMode.HTML,
         )
     else:
-        context.bot.send_message(
-            chat_id=update.effective_chat.id, text="I don't recognize that personality."
-        )
+        await update.message.reply_text("I don't recognize that personality.")
 
 
-def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    log_user(user)
-    if is_user_blocked(user.id):
+    log_user(user) # Sync function
+    if is_user_blocked(user.id): # Sync function
         return
     context.chat_data["personality"] = "default"
     # Also clear the chat history for this chat
     if is_db_connected():
-        history_col.delete_one({"_id": update.effective_chat.id})
-    context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="I'm back to my natural self! I've also cleared our recent chat history for a fresh start.",
+        history_col.delete_one({"_id": update.effective_chat.id}) # Sync function
+    await update.message.reply_text(
+        "I'm back to my natural self! I've also cleared our recent chat history for a fresh start.",
     )
 
 
-def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    log_user(update.effective_user)
-    if is_user_blocked(user_id):
+    log_user(update.effective_user) # Sync function
+    if is_user_blocked(user_id): # Sync function
         return
     if not is_admin(user_id):
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Sorry, this is an admin-only command.",
-        )
+        await update.message.reply_text("Sorry, this is an admin-only command.")
         return
     query_text = " ".join(context.args)
     if not query_text:
@@ -489,7 +547,7 @@ def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         query = f"Provide a news summary about: {query_text}"
 
-    context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await update.message.chat.send_action(action="typing")
 
     news_system_prompt = (
         "You are a news summarizer. You must provide concise, factual summaries of the news. "
@@ -499,18 +557,17 @@ def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         # News command does not use chat history
-        response_text = get_gemini_response(
+        response_text = get_gemini_response( # Sync function
             query,
             system_prompt_override=news_system_prompt,
             use_search=True,
             chat_history=[],  # Pass empty history
         )
-        context.bot.send_message(chat_id=update.effective_chat.id, text=response_text)
+        await update.message.reply_text(response_text)
     except Exception as e:
         logger.error(f"Error in /news command: {e}")
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Sorry, I couldn't fetch the news right now. Please try again later.",
+        await update.message.reply_text(
+            "Sorry, I couldn't fetch the news right now. Please try again later.",
         )
 
 
@@ -532,7 +589,8 @@ def get_gemini_response(
         logger.error("GEMINI_API_KEY not set.")
         return "Sorry, my AI brain is not configured. (Admin: Check GEMINI_API_KEY)"
 
-    api_url = f"https{os.environ.get('GEMINI_API_URL', '://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent')}?key={GEMINI_API_KEY}"
+    # --- THIS IS THE CHANGE ---
+    api_url = f"https{os.environ.get('GEMINI_API_URL', '://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent')}?key={GEMINI_API_KEY}"
 
     if system_prompt_override:
         system_prompt = system_prompt_override
@@ -549,6 +607,11 @@ def get_gemini_response(
         user_parts.append(
             {"inlineData": {"mimeType": image_mime_type, "data": image_data_base64}}
         )
+        
+    # If no text and no image, something is wrong
+    if not user_parts:
+        logger.warning("get_gemini_response called with no prompt and no image.")
+        return "What was that? I didn't get your message."
 
     # Build the full conversation history
     conversation_history = chat_history + [{"role": "user", "parts": user_parts}]
@@ -606,14 +669,14 @@ def get_gemini_response(
         return "Sorry, I encountered an unexpected error."
 
 
-# --- CORE MESSAGE HANDLER (Now with History) ---
-def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- CORE MESSAGE HANDLER (NOW ASYNC) ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     chat_id = chat.id
 
-    log_user(user)
-    if is_user_blocked(user.id):
+    log_user(user) # Sync function
+    if is_user_blocked(user.id): # Sync function
         return
 
     prompt = update.message.text
@@ -642,51 +705,50 @@ def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     personality = context.chat_data.get("personality", "default")
 
-    context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    await update.message.chat.send_action(action="typing")
 
     try:
         # 1. Get history from DB
-        chat_history = get_chat_history(chat_id)
+        chat_history = get_chat_history(chat_id) # Sync function
 
         # 2. Get response from Gemini
-        response_text = get_gemini_response(
+        response_text = get_gemini_response( # Sync function
             prompt, chat_history=chat_history, chat_personality=personality
         )
 
         # 3. Send response to user
-        context.bot.send_message(chat_id=chat_id, text=response_text)
+        await update.message.reply_text(response_text)
 
         # 4. Update history in DB
         chat_history.append({"role": "user", "parts": [{"text": prompt}]})
         chat_history.append({"role": "model", "parts": [{"text": response_text}]})
-        save_chat_history(chat_id, chat_history)
+        save_chat_history(chat_id, chat_history) # Sync function
 
     except Exception as e:
         logger.error(f"Error in handle_message: {e}")
-        context.bot.send_message(
-            chat_id=chat_id,
-            text="Sorry, I had a little hiccup. Could you try that again?",
+        await update.message.reply_text(
+            "Sorry, I had a little hiccup. Could you try that again?",
         )
 
-# --- NEW: IMAGE HANDLER ---
-def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- NEW: IMAGE HANDLER (NOW ASYNC) ---
+async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     chat_id = chat.id
 
-    log_user(user)
-    if is_user_blocked(user.id):
+    log_user(user) # Sync function
+    if is_user_blocked(user.id): # Sync function
         return
     
-    context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    await update.message.chat.send_action(action="typing")
 
     try:
         # Get the largest photo
-        photo_file = update.message.photo[-1].get_file()
+        photo_file = await update.message.photo[-1].get_file()
         
         # Download as bytes
         file_bytes_io = io.BytesIO()
-        photo_file.download(out=file_bytes_io)
+        await photo_file.download(out=file_bytes_io)
         file_bytes_io.seek(0)
         image_bytes = file_bytes_io.read()
         
@@ -699,10 +761,10 @@ def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prompt = "Please describe this image in a friendly and conversational way. Be brief unless the image is complex."
         
         # Get chat history (it's good for context, e.g., "what is this?")
-        chat_history = get_chat_history(chat_id)
+        chat_history = get_chat_history(chat_id) # Sync function
         
         # Call Gemini with the image data
-        response_text = get_gemini_response(
+        response_text = get_gemini_response( # Sync function
             prompt,
             chat_history=chat_history,
             image_data_base64=image_base64,
@@ -710,48 +772,47 @@ def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # Send response
-        context.bot.send_message(chat_id=chat_id, text=response_text, reply_to_message_id=update.message.message_id)
+        await update.message.reply_text(text=response_text, reply_to_message_id=update.message.message_id)
 
         # Update history
         history_prompt = f"[User sent an image with caption: {prompt}]"
         chat_history.append({"role": "user", "parts": [{"text": history_prompt}]})
         chat_history.append({"role": "model", "parts": [{"text": response_text}]})
-        save_chat_history(chat_id, chat_history)
+        save_chat_history(chat_id, chat_history) # Sync function
 
     except Exception as e:
         logger.error(f"Error in handle_image_message: {e}")
-        context.bot.send_message(
-            chat_id=chat_id,
-            text="Sorry, I had trouble seeing that image. Could you try again?",
+        await update.message.reply_text(
+            "Sorry, I had trouble seeing that image. Could you try again?",
         )
 
-# --- NEW: VOICE HANDLER ---
-def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- NEW: VOICE HANDLER (NOW ASYNT) ---
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     chat_id = chat.id
 
-    log_user(user)
-    if is_user_blocked(user.id):
+    log_user(user) # Sync function
+    if is_user_blocked(user.id): # Sync function
         return
 
     # User-requested Hinglish reply
     reply_text = "Arre waah, voice note! Cool. Main abhi voice notes sun nahi sakti, kyunki mere paas kaan nahi hain! 😅 \nAap type karke bataoge toh main pakka reply karungi!"
     
-    context.bot.send_message(chat_id=chat_id, text=reply_text, reply_to_message_id=update.message.message_id)
+    await update.message.reply_text(text=reply_text, reply_to_message_id=update.message.message_id)
     
     # We can log that a voice note was sent, but we can't log its content
     try:
-        chat_history = get_chat_history(chat_id)
+        chat_history = get_chat_history(chat_id) # Sync function
         chat_history.append({"role": "user", "parts": [{"text": "[User sent a voice note]"}]})
         chat_history.append({"role": "model", "parts": [{"text": reply_text}]})
-        save_chat_history(chat_id, chat_history)
+        save_chat_history(chat_id, chat_history) # Sync function
     except Exception as e:
         logger.error(f"Error saving voice note history: {e}")
 
 
-# --- CHAT MEMBER HANDLER ---
-def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- CHAT MEMBER HANDLER (NOW ASYNC) ---
+async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.chat_member
     if result is None:
         return
@@ -760,10 +821,10 @@ def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = result.new_chat_member.status
         if status == ChatMember.MEMBER:
             logger.info(f"Added to new chat: {chat_id}")
-            update_active_chats(chat_id, "add")
+            update_active_chats(chat_id, "add") # Sync function
         elif status in [ChatMember.LEFT, ChatMember.KICKED]:
             logger.info(f"Removed from chat: {chat_id}")
-            update_active_chats(chat_id, "remove")
+            update_active_chats(chat_id, "remove") # Sync function
 
 
 # --- ADMIN HELPER ---
@@ -801,6 +862,12 @@ def get_application():
                         CommandHandler("admin_set_prompt", admin_set_prompt)
                     )
                     application.add_handler(CommandHandler("news", news_command))
+                    
+                    # --- NEW: Broadcast Handler ---
+                    # We also listen for photos, so we use a different filter
+                    application.add_handler(CommandHandler("broadcast", broadcast_command))
+                    application.add_handler(MessageHandler(filters.PHOTO & filters.Caption(("/broadcast")), broadcast_command))
+                    
                     # Public
                     application.add_handler(CommandHandler("start", start))
                     application.add_handler(CommandHandler("help", show_help))
@@ -815,7 +882,7 @@ def get_application():
                     # --- NEW HANDLERS ---
                     # Add image and voice handlers *before* the general text handler
                     application.add_handler(
-                        MessageHandler(filters.PHOTO, handle_image_message)
+                        MessageHandler(filters.PHOTO & ~filters.Caption(("/broadcast")), handle_image_message)
                     )
                     application.add_handler(
                         MessageHandler(filters.VOICE, handle_voice_message)
@@ -959,7 +1026,7 @@ def set_webhook():
         webhook_url = f"{render_url}/webhook"
     else:
         # Build it manually, ensuring no double "://"
-        webhook_url = f"https://{host}/webhook"
+        webhook_url = f"https{os.environ.get('RENDER_EXTERNAL_URL', '://' + host)}/webhook" # Render is always https
     # --- END WEBHOOK URL FIX ---
 
     try:
