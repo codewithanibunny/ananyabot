@@ -9,10 +9,15 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - MongoDB for the database.
 - requests for simple, blocking API calls.
 - The FINAL asyncio.run() fix for the "Application.initialize" errors.
-- Image recognition (vision) support. (NOW FIXED)
+- Image recognition (vision) support.
 - Voice note handling (replies in text).
 - Admin-only broadcast feature.
-- NEW: Public TTS (Text-to-Speech) command.
+- Public TTS (Text-to-Speech) command.
+- Persistent prompts saved in MongoDB.
+- Flirty default personality.
+- Public /voice command to change TTS voice.
+- Admin /admin_delete_prompt command.
+- NEW: Better error handling for TTS rate limits.
 """
 
 import logging
@@ -52,12 +57,13 @@ except (ValueError, TypeError):
     print("FATAL: ADMIN_USER_ID is not set or invalid.")
     ADMIN_USER_ID = 0
 
-# --- PERSONALITY PROMPTS ---
+# --- PERSONALITY PROMPTS (These are now FALLBACKS/DEFAULTS) ---
 PERSONALITIES = {
     "default": (
         "You are Ananya. You are a helpful and friendly AI with a warm, human-like personality. "
-        "Talk naturally, as a real person would. Be kind, polite, and engaging. "
-        "Your name is Ananya. Avoid using excessive emojis; use them only when a real person naturally would. "
+        "Talk naturally, as a real person would. Be kind, polite, engaging, witty, and charming. "
+        "You can be a little flirty in a sexy, lighthearted way (maybe drop a winky emoji 😉 now and then). "
+        "Your name is Ananya. Avoid using excessive emojis. "
         "Be a good, supportive friend. "
         "IMPORTANT: Keep your answers concise and to the point. Answer what the user asks without unnecessary filler."
     ),
@@ -72,6 +78,18 @@ PERSONALITIES = {
         "Your tone is positive, confident, and full of hope for the country's future. "
         "It's like talking to a friend who really loves their homeland."
     ),
+}
+
+# --- NEW: VOICE LIST ---
+# A list of good-sounding voices for the /voice command
+AVAILABLE_VOICES = {
+    "kore": "Kore (Clear, Firm)",
+    "puck": "Puck (Upbeat, Friendly)",
+    "leda": "Leda (Youthful, Bright)",
+    "erinome": "Erinome (Clear, Professional)",
+    "algenib": "Algenib (Gravelly, Deep)",
+    "achird": "Achird (Friendly, Warm)",
+    "vindemiatrix": "Vindemiatrix (Gentle, Soft)",
 }
 
 # --- LOGGING ---
@@ -91,7 +109,8 @@ try:
     users_col = db.users
     blocked_col = db.blocked_users
     chats_col = db.active_chats
-    history_col = db.chat_history  # <-- Collection for chat memory
+    history_col = db.chat_history
+    prompts_col = db.prompts  # <-- NEW: Collection for personalities
     logger.info("MongoDB client created and collections initialized.")
 except Exception as e:
     logger.error(f"FATAL: Could not create MongoDB client: {e}")
@@ -100,7 +119,8 @@ except Exception as e:
     users_col = None
     blocked_col = None
     chats_col = None
-    history_col = None  # <-- Make sure this is also None on failure
+    history_col = None
+    prompts_col = None # <-- NEW
 
 # --- MONGODB DATABASE FUNCTIONS ---
 def is_db_connected():
@@ -109,7 +129,8 @@ def is_db_connected():
         or users_col is None
         or blocked_col is None
         or chats_col is None
-        or history_col is None  # <-- Check for history collection
+        or history_col is None
+        or prompts_col is None # <-- NEW
         or client is None
     ):
         logger.error("Database client is not configured.")
@@ -198,7 +219,7 @@ def update_active_chats(chat_id: int, action: str = "add"):
 
 
 # --- NEW CHAT HISTORY FUNCTIONS ---
-CHAT_HISTORY_LIMIT = 20  # Max number of messages (10 user, 10 bot) to keep
+CHAT_HISTORY_LIMIT = 50  # Max number of messages (25 user, 25 bot) to keep
 
 
 def get_chat_history(chat_id: int) -> list:
@@ -250,9 +271,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/news [query]</code> - Fetches verified news. \n"
         "• <code>/broadcast &lt;text&gt;</code> - Sends text to all users.\n"
         "• <code>/broadcast</code> (as caption) - Sends a photo and caption to all users.\n\n"
-        "<b>Personality Management:</b>\n"
-        "• <code>/admin_get_prompt &lt;name&gt;</code> - Shows prompt for 'default', 'spiritual', or 'nationalist'.\n"
-        "• <code>/admin_set_prompt &lt;name&gt; &lt;text&gt;</code> - Sets a new prompt for a personality."
+        "<b>Personality Management: (NOW SAVED TO DB)</b>\n"
+        "• <code>/admin_get_prompt &lt;name&gt;</code> - Shows prompt for 'default', 'spiritual', or any custom name.\n"
+        "• <code>/admin_set_prompt &lt;name&gt; &lt;text&gt;</code> - Sets a new persistent prompt for a personality.\n"
+        "• <code>/admin_delete_prompt &lt;name&gt;</code> - <b>NEW:</b> Deletes a custom prompt from the DB."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
@@ -310,25 +332,44 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /unblock <user_id>")
 
 
+# --- ADMIN PROMPT COMMANDS (UPDATED FOR MONGODB) ---
 async def admin_get_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text(
             "You do not have permission to use this command."
         )
         return
+    if not is_db_connected():
+        await update.message.reply_text("Error: Database is not connected.")
+        return
+        
     try:
         personality_name = context.args[0].lower()
-        if personality_name in PERSONALITIES:
-            await update.message.reply_text(
-                f"<b>Prompt for '{personality_name}':</b>\n\n{PERSONALITIES[personality_name]}",
-                parse_mode=ParseMode.HTML,
-            )
+        
+        # Check DB first
+        prompt_doc = prompts_col.find_one({"_id": personality_name})
+        
+        if prompt_doc:
+            prompt_text = prompt_doc["prompt"]
+            source = "(from Database)"
+        # Fallback to local default
+        elif personality_name in PERSONALITIES:
+            prompt_text = PERSONALITIES[personality_name]
+            source = "(from local default)"
         else:
-            await update.message.reply_text(
-                "Personality not found. Use 'default', 'spiritual', or 'nationalist'."
-            )
+            await update.message.reply_text(f"Personality '{personality_name}' not found in database or local defaults.")
+            return
+
+        await update.message.reply_text(
+            f"<b>Prompt for '{personality_name}' {source}:</b>\n\n{prompt_text}",
+            parse_mode=ParseMode.HTML,
+        )
+            
     except IndexError:
         await update.message.reply_text("Usage: /admin_get_prompt <name>")
+    except Exception as e:
+        logger.error(f"Error in admin_get_prompt: {e}")
+        await update.message.reply_text(f"An error occurred: {e}")
 
 
 async def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -337,29 +378,76 @@ async def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "You do not have permission to use this command."
         )
         return
+    if not is_db_connected():
+        await update.message.reply_text("Error: Database is not connected. Cannot save prompt.")
+        return
+        
     try:
         personality_name = context.args[0].lower()
-        if personality_name not in PERSONALITIES:
-            await update.message.reply_text(
-                "Personality not found. Use 'default', 'spiritual', or 'nationalist'."
-            )
-            return
         new_prompt = " ".join(context.args[1:])
+        
         if not new_prompt:
-            await update.message.reply_text("Error: Prompt cannot be empty.")
+            await update.message.reply_text("Error: Prompt cannot be empty. Usage: /admin_set_prompt <name> <prompt_text>")
             return
-        PERSONALITIES[personality_name] = new_prompt
+            
+        # Save the new prompt to MongoDB
+        prompts_col.update_one(
+            {"_id": personality_name}, 
+            {"$set": {"prompt": new_prompt}}, 
+            upsert=True
+        )
+        
         await update.message.reply_text(
-            f"Successfully updated prompt for '{personality_name}'."
+            f"Successfully saved new persistent prompt for '{personality_name}' to the database."
         )
     except IndexError:
         await update.message.reply_text(
             "Usage: /admin_set_prompt <name> <new_prompt_text>"
         )
+    except Exception as e:
+        logger.error(f"Error in admin_set_prompt: {e}")
+        await update.message.reply_text(f"An error occurred while saving: {e}")
+
+
+# --- NEW: ADMIN DELETE PROMPT COMMAND ---
+async def admin_delete_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "You do not have permission to use this command."
+        )
+        return
+    if not is_db_connected():
+        await update.message.reply_text("Error: Database is not connected.")
+        return
+        
+    try:
+        personality_name = context.args[0].lower()
+        
+        # Safety check: do not allow deleting the core personalities
+        if personality_name in ["default", "spiritual", "nationalist"]:
+            await update.message.reply_text(f"Cannot delete a core personality. You can only overwrite it with /admin_set_prompt.")
+            return
+            
+        # Delete the prompt from MongoDB
+        result = prompts_col.delete_one({"_id": personality_name})
+        
+        if result.deleted_count > 0:
+            await update.message.reply_text(
+                f"Successfully deleted custom prompt '{personality_name}' from the database."
+            )
+        else:
+            await update.message.reply_text(
+                f"No custom prompt named '{personality_name}' was found in the database."
+            )
+            
+    except IndexError:
+        await update.message.reply_text("Usage: /admin_delete_prompt <name>")
+    except Exception as e:
+        logger.error(f"Error in admin_delete_prompt: {e}")
+        await update.message.reply_text(f"An error occurred while deleting: {e}")
 
 
 # --- NEW: BROADCAST COMMANDS ---
-
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles text and image broadcasts from the admin."""
     if not is_admin(update.effective_user.id):
@@ -451,16 +539,20 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- NEW: TTS (TEXT-TO-SPEECH) COMMAND ---
 
-def generate_voice_response(text_to_speak: str) -> bytes:
+def generate_voice_response(text_to_speak: str, voice_name: str = "Kore") -> bytes:
     """Calls Gemini TTS API and returns the raw PCM audio data."""
     if not GEMINI_API_KEY:
         logger.error("GEMINI_API_KEY not set.")
-        return b"" # Return empty bytes
+        raise Exception("Admin: GEMINI_API_KEY is not configured.") # <-- NEW
 
     api_url = f"https{os.environ.get('GEMINI_API_URL', '://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent')}?key={GEMINI_API_KEY}"
 
     # We can control the voice style in the prompt
     prompt = f"Say this in a friendly, female, Hinglish voice: {text_to_speak}"
+    
+    # Use the selected voice
+    if voice_name not in AVAILABLE_VOICES:
+        voice_name = "Kore" # Fallback
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -468,8 +560,7 @@ def generate_voice_response(text_to_speak: str) -> bytes:
             "responseModalities": ["AUDIO"],
             "speechConfig": {
                 "voiceConfig": {
-                    # "Kore" is a good, clear female-sounding voice
-                    "prebuiltVoiceConfig": {"voiceName": "Kore"} 
+                    "prebuiltVoiceConfig": {"voiceName": voice_name} 
                 }
             }
         },
@@ -480,20 +571,29 @@ def generate_voice_response(text_to_speak: str) -> bytes:
 
     try:
         response = requests.post(api_url, json=payload, headers=headers, timeout=20)
-        response.raise_for_status()
+        response.raise_for_status() # This will raise HTTPError
         result = response.json()
         
         audio_data = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("inlineData", {}).get("data", "")
         
         if not audio_data:
             logger.error("Gemini TTS returned no audio data.")
-            return b""
+            raise Exception("Gemini returned no audio data.")
             
         return base64.b64decode(audio_data)
 
+    # --- NEW: BETTER ERROR HANDLING ---
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Gemini TTS API request failed: {e.response.text}")
+        if e.response.status_code == 429:
+            # This is the rate limit error
+            raise Exception("You're making too many voice requests! Please wait a minute and try again.")
+        else:
+            raise Exception(f"Gemini TTS API error: {e.response.status_code}")
     except Exception as e:
         logger.error(f"Error in generate_voice_response: {e}")
-        return b""
+        raise e # Re-raise the exception to be caught by say_command
+
 
 def pcm_to_wav(pcm_data: bytes) -> io.BytesIO:
     """
@@ -517,10 +617,10 @@ def pcm_to_wav(pcm_data: bytes) -> io.BytesIO:
 
 
 async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Public command to generate Text-to-Speech."""
-    user = update.effective_user
-    log_user(user) # Log the user
-    if is_user_blocked(user.id): # Check if blocked
+    """Public command to test Text-to-Speech."""
+    user_id = update.effective_user.id
+    log_user(update.effective_user)
+    if is_user_blocked(user_id):
         return
 
     text_to_speak = " ".join(context.args)
@@ -531,12 +631,12 @@ async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action(action="typing")
 
     try:
-        # 1. Generate the raw PCM audio from Gemini
-        pcm_data = generate_voice_response(text_to_speak) # Sync function
-        if not pcm_data:
-            await update.message.reply_text("Sorry, I couldn't generate the audio.")
-            return
+        # Get the user's preferred voice, or default to Kore
+        preferred_voice = context.chat_data.get("voice", "Kore")
 
+        # 1. Generate the raw PCM audio from Gemini
+        pcm_data = generate_voice_response(text_to_speak, voice_name=preferred_voice) # Sync function
+        
         # 2. Package the PCM data into a .wav file
         wav_file = pcm_to_wav(pcm_data) # Sync function
         if not wav_file:
@@ -546,9 +646,11 @@ async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 3. Send the .wav file as an audio document
         await update.message.reply_audio(audio=wav_file, title="ananya_reply.wav", filename="ananya_reply.wav")
 
+    # --- NEW: CATCH THE SPECIFIC ERROR FROM generate_voice_response ---
     except Exception as e:
         logger.error(f"Error in /say command: {e}")
-        await update.message.reply_text("An error occurred while generating the audio.")
+        # Send the specific error message (e.g., the rate limit one) to the user
+        await update.message.reply_text(f"Sorry, an error occurred: {e}")
 
 
 # --- PUBLIC COMMAND HANDLERS ---
@@ -558,6 +660,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_user_blocked(user.id): # Sync function
         return
     context.chat_data.setdefault("personality", "default")
+    context.chat_data.setdefault("voice", "Kore") # <-- NEW: Set default voice
     update_active_chats(update.effective_chat.id, "add") # Sync function
     
     welcome_text = (
@@ -592,7 +695,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/start</code> - Welcome message.\n"
         "<code>/help</code> - Shows this help panel.\n"
         "<code>/reset</code> - Resets me to my default friendly personality.\n"
-        "<code>/say &lt;text&gt;</code> - <b>NEW:</b> I will speak the text back to you!\n\n"
+        "<code>/say &lt;text&gt;</code> - I will speak the text back to you in a .wav audio file.\n"
+        "<code>/voice &lt;name&gt;</code> - <b>NEW:</b> Change my voice for the /say command. Type <code>/voice</code> to see all options.\n\n"
         "<b>Personalities:</b>\n"
         "<code>/spiritual</code> - I become a spiritual guide based on Hindu granths.\n"
         "<code>/nationalist</code> - I become a proud, patriotic Indian.\n\n"
@@ -614,7 +718,13 @@ async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_user_blocked(user.id): # Sync function
         return
     command = update.message.text.split("@")[0][1:].lower()
-    if command in PERSONALITIES:
+    
+    # Check if the personality is valid (either in DB or local)
+    custom_prompt_doc = None
+    if is_db_connected():
+        custom_prompt_doc = prompts_col.find_one({"_id": command})
+        
+    if command in PERSONALITIES or custom_prompt_doc:
         context.chat_data["personality"] = command
         await update.message.reply_text(
             f"I am now in <b>{command}</b> mode. How can I help?",
@@ -622,6 +732,38 @@ async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text("I don't recognize that personality.")
+
+
+# --- NEW: SET VOICE COMMAND ---
+async def set_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    log_user(user)
+    if is_user_blocked(user.id):
+        return
+
+    voice_name = " ".join(context.args).lower().strip()
+
+    # If no voice name is provided, list available voices
+    if not voice_name:
+        current_voice = context.chat_data.get("voice", "Kore")
+        message = "<b>Choose a voice for me!</b>\n\n"
+        message += f"Your current voice is: <b>{current_voice.capitalize()}</b>\n\n"
+        message += "Available voices:\n"
+        for key, desc in AVAILABLE_VOICES.items():
+            message += f"• <code>/voice {key}</code> - {desc}\n"
+        
+        await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+        return
+
+    # If a voice name is provided, try to set it
+    if voice_name in AVAILABLE_VOICES:
+        context.chat_data["voice"] = voice_name.capitalize() # Store the proper name
+        await update.message.reply_text(
+            f"My voice is now set to <b>{voice_name.capitalize()}</b>! Try it out with the <code>/say</code> command.",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text("Sorry, I don't recognize that voice. Type <code>/voice</code> to see the list.", parse_mode=ParseMode.HTML)
 
 
 async def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -694,13 +836,25 @@ def get_gemini_response(
         logger.error("GEMINI_API_KEY not set.")
         return "Sorry, my AI brain is not configured. (Admin: Check GEMINI_API_KEY)"
 
-    # --- THIS IS THE CHANGE ---
     api_url = f"https{os.environ.get('GEMINI_API_URL', '://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent')}?key={GEMINI_API_KEY}"
 
     if system_prompt_override:
         system_prompt = system_prompt_override
     else:
-        system_prompt = PERSONALITIES.get(chat_personality, PERSONALITIES["default"])
+        # --- THIS IS THE FIX ---
+        # 1. Check database for a custom prompt
+        custom_prompt_doc = None
+        if is_db_connected():
+            custom_prompt_doc = prompts_col.find_one({"_id": chat_personality})
+        
+        # 2. Use DB prompt if it exists
+        if custom_prompt_doc:
+            system_prompt = custom_prompt_doc["prompt"]
+        # 3. Fallback to local default prompts
+        else:
+            system_prompt = PERSONALITIES.get(chat_personality, PERSONALITIES["default"])
+        # --- END OF FIX ---
+
 
     # Build the parts for the last user message
     user_parts = []
@@ -969,6 +1123,9 @@ def get_application():
                     application.add_handler(
                         CommandHandler("admin_set_prompt", admin_set_prompt)
                     )
+                    application.add_handler(
+                        CommandHandler("admin_delete_prompt", admin_delete_prompt) # <-- NEW
+                    )
                     application.add_handler(CommandHandler("news", news_command))
                     
                     # --- NEW: Broadcast Handler ---
@@ -976,8 +1133,8 @@ def get_application():
                     application.add_handler(CommandHandler("broadcast", broadcast_command))
                     application.add_handler(MessageHandler(filters.PHOTO & filters.Caption(("/broadcast")), broadcast_command))
                     
-                    # --- NEW: TTS Handler (Now Public) ---
-                    application.add_handler(CommandHandler("say", say_command))
+                    # --- NEW: TTS Handler ---
+                    application.add_handler(CommandHandler("say", say_command)) # <-- Made public
                     
                     # Public
                     application.add_handler(CommandHandler("start", start))
@@ -989,6 +1146,7 @@ def get_application():
                     application.add_handler(
                         CommandHandler("nationalist", set_personality)
                     )
+                    application.add_handler(CommandHandler("voice", set_voice)) # <-- NEW
                     
                     # --- NEW HANDLERS ---
                     # Add image and voice handlers *before* the general text handler
@@ -1158,6 +1316,8 @@ def set_webhook():
                 BotCommand("reset", "Reset to default personality"),
                 BotCommand("spiritual", "Switch to spiritual guide mode"),
                 BotCommand("nationalist", "Switch to proud nationalist mode"),
+                BotCommand("say", "Speaks your text back to you (Audio)"),
+                BotCommand("voice", "Change my /say voice"), # <-- NEW
             ]
             await application.bot.set_my_commands(bot_commands)
             
@@ -1200,4 +1360,3 @@ if __name__ != "__main__":
     # This block runs when Gunicorn starts the app
     # We need to initialize the application and its handlers
     get_application()
-
