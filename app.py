@@ -14,10 +14,9 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - Admin-only broadcast feature.
 - Public TTS (Text-to-Speech) command.
 - Persistent prompts saved in MongoDB.
-- Flirty default personality.
-- Public /voice command to change TTS voice.
-- Admin /admin_delete_prompt command.
-- NEW: Better error handling for TTS rate limits.
+- NEW: Flirty default personality.
+- NEW: Public /voice command to change TTS voice.
+- NEW: Admin /admin_delete_prompt command.
 """
 
 import logging
@@ -62,7 +61,7 @@ PERSONALITIES = {
     "default": (
         "You are Ananya. You are a helpful and friendly AI with a warm, human-like personality. "
         "Talk naturally, as a real person would. Be kind, polite, engaging, witty, and charming. "
-        "You can be a little flirty in a sexy, lighthearted way (maybe drop a winky emoji 😉 now and then). "
+        "You can be a little flirty in a sexy, horny way (maybe drop emoji like 😜 😝 😽 🥵 💋 🫦 😘 😉 now and then). "
         "Your name is Ananya. Avoid using excessive emojis. "
         "Be a good, supportive friend. "
         "IMPORTANT: Keep your answers concise and to the point. Answer what the user asks without unnecessary filler."
@@ -219,7 +218,7 @@ def update_active_chats(chat_id: int, action: str = "add"):
 
 
 # --- NEW CHAT HISTORY FUNCTIONS ---
-CHAT_HISTORY_LIMIT = 50  # Max number of messages (25 user, 25 bot) to keep
+CHAT_HISTORY_LIMIT = 20  # Max number of messages (10 user, 10 bot) to keep
 
 
 def get_chat_history(chat_id: int) -> list:
@@ -1048,7 +1047,7 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "Sorry, I had trouble seeing that image. Could you try again?",
         )
 
-# --- NEW: VOICE HANDLER (NOW ASYNT) ---
+# --- NEW: VOICE HANDLER (NOW ASNT) ---
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
