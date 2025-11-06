@@ -14,9 +14,12 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - Admin-only broadcast feature.
 - Public TTS (Text-to-Speech) command.
 - Persistent prompts saved in MongoDB.
-- NEW: Flirty default personality.
-- NEW: Public /voice command to change TTS voice.
-- NEW: Admin /admin_delete_prompt command.
+- Flirty default personality.
+- Public /voice command to change TTS voice.
+- Admin /admin_delete_prompt command.
+- Dynamic /set <personality> command.
+- NEW: Dynamic command lists (Admin sees admin commands, public sees public)
+- NEW: Clickable admin link in /help
 """
 
 import logging
@@ -28,7 +31,7 @@ import base64   # <-- NEW FOR IMAGES
 import io       # <-- NEW FOR IMAGES
 import wave     # <-- NEW FOR TTS
 import struct   # <-- NEW FOR TTS
-from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated
+from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated, BotCommandScope
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -61,7 +64,7 @@ PERSONALITIES = {
     "default": (
         "You are Ananya. You are a helpful and friendly AI with a warm, human-like personality. "
         "Talk naturally, as a real person would. Be kind, polite, engaging, witty, and charming. "
-        "You can be a little flirty in a sexy, horny way (maybe drop emoji like 😜 😝 😽 🥵 💋 🫦 😘 😉 now and then). "
+        "You can be a little playful and flirty in a sexy, horny, sex way (maybe drop emoji 😘 🫦 💋 🥵 😽 😝 😜 🥰 sometime). "
         "Your name is Ananya. Avoid using excessive emojis. "
         "Be a good, supportive friend. "
         "IMPORTANT: Keep your answers concise and to the point. Answer what the user asks without unnecessary filler."
@@ -273,7 +276,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Personality Management: (NOW SAVED TO DB)</b>\n"
         "• <code>/admin_get_prompt &lt;name&gt;</code> - Shows prompt for 'default', 'spiritual', or any custom name.\n"
         "• <code>/admin_set_prompt &lt;name&gt; &lt;text&gt;</code> - Sets a new persistent prompt for a personality.\n"
-        "• <code>/admin_delete_prompt &lt;name&gt;</code> - <b>NEW:</b> Deletes a custom prompt from the DB."
+        "• <code>/admin_delete_prompt &lt;name&gt;</code> - Deletes a custom prompt from the DB."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
@@ -397,7 +400,9 @@ async def admin_set_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         await update.message.reply_text(
-            f"Successfully saved new persistent prompt for '{personality_name}' to the database."
+            f"Successfully saved new persistent prompt for '{personality_name}' to the database.\n"
+            f"Users can now access it with: <code>/set {personality_name}</code>",
+            parse_mode=ParseMode.HTML
         )
     except IndexError:
         await update.message.reply_text(
@@ -695,11 +700,13 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/help</code> - Shows this help panel.\n"
         "<code>/reset</code> - Resets me to my default friendly personality.\n"
         "<code>/say &lt;text&gt;</code> - I will speak the text back to you in a .wav audio file.\n"
-        "<code>/voice &lt;name&gt;</code> - <b>NEW:</b> Change my voice for the /say command. Type <code>/voice</code> to see all options.\n\n"
-        "<b>Personalities:</b>\n"
-        "<code>/spiritual</code> - I become a spiritual guide based on Hindu granths.\n"
-        "<code>/nationalist</code> - I become a proud, patriotic Indian.\n\n"
-        f"For more information and help, you can contact my admin: @certifiedbandichor"
+        "<code>/voice &lt;name&gt;</code> - Change my voice for the /say command. Type <code>/voice</code> to see all options.\n"
+        "<code>/set &lt;name&gt;</code> - <b>NEW:</b> Change my personality (e.g., <code>/set spiritual</code>).\n\n"
+        "<b>Default Personalities:</b>\n"
+        "• <code>spiritual</code>\n"
+        "• <code>nationalist</code>\n"
+        "(Your admin can add more!)\n\n"
+        f'For more information and help, you can <a href="tg://user?id={ADMIN_USER_ID}">contact my admin</a>.'
     )
 
     try:
@@ -711,12 +718,19 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# --- UPDATED: SET PERSONALITY (NOW DYNAMIC) ---
 async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user(user) # Sync function
     if is_user_blocked(user.id): # Sync function
         return
-    command = update.message.text.split("@")[0][1:].lower()
+        
+    try:
+        # Get personality name from the argument
+        command = context.args[0].lower()
+    except IndexError:
+        await update.message.reply_text("Usage: /set <personality_name>\n(e.g., /set spiritual)")
+        return
     
     # Check if the personality is valid (either in DB or local)
     custom_prompt_doc = None
@@ -730,7 +744,7 @@ async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
     else:
-        await update.message.reply_text("I don't recognize that personality.")
+        await update.message.reply_text(f"Sorry, I don't recognize the personality '{command}'.")
 
 
 # --- NEW: SET VOICE COMMAND ---
@@ -1140,10 +1154,7 @@ def get_application():
                     application.add_handler(CommandHandler("help", show_help))
                     application.add_handler(CommandHandler("reset", reset_personality))
                     application.add_handler(
-                        CommandHandler("spiritual", set_personality)
-                    )
-                    application.add_handler(
-                        CommandHandler("nationalist", set_personality)
+                        CommandHandler("set", set_personality) # <-- THIS IS THE NEW DYNAMIC COMMAND
                     )
                     application.add_handler(CommandHandler("voice", set_voice)) # <-- NEW
                     
@@ -1308,17 +1319,35 @@ def set_webhook():
                 drop_pending_updates=True,
             )
             
-            # Set the bot's commands
-            bot_commands = [
+            # --- NEW: DYNAMIC COMMANDS ---
+            # 1. Set PUBLIC commands for everyone
+            public_commands = [
                 BotCommand("start", "Welcome message"),
                 BotCommand("help", "Show help and commands"),
                 BotCommand("reset", "Reset to default personality"),
-                BotCommand("spiritual", "Switch to spiritual guide mode"),
-                BotCommand("nationalist", "Switch to proud nationalist mode"),
+                BotCommand("set", "Change personality (e.g. /set spiritual)"),
                 BotCommand("say", "Speaks your text back to you (Audio)"),
-                BotCommand("voice", "Change my /say voice"), # <-- NEW
+                BotCommand("voice", "Change my /say voice"),
             ]
-            await application.bot.set_my_commands(bot_commands)
+            await application.bot.set_my_commands(public_commands)
+            
+            # 2. Set ADMIN commands for you ONLY
+            admin_commands = public_commands + [
+                BotCommand("admin", "Show Admin Panel"),
+                BotCommand("admin_stats", "Show bot statistics"),
+                BotCommand("block", "Block a user"),
+                BotCommand("unblock", "Unblock a user"),
+                BotCommand("news", "Fetch breaking news"),
+                BotCommand("broadcast", "Send message to all users"),
+                BotCommand("admin_get_prompt", "Get a personality prompt"),
+                BotCommand("admin_set_prompt", "Set a personality prompt"),
+                BotCommand("admin_delete_prompt", "Delete a personality prompt"),
+            ]
+            await application.bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScope.CHAT(ADMIN_USER_ID)
+            )
+            # --- END DYNAMIC COMMANDS ---
             
             # Set the bot's name
             await application.bot.set_my_name("Ananya")
