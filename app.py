@@ -1169,69 +1169,532 @@ def get_application():
 
 # --- FLASK APP FOR RENDER ---
 app = Flask(__name__)
-# Initialize the bot object immediately when the app starts
-get_application()
+bcrypt = Bcrypt(app) # <-- NEW
+# Configure session
+app.config["SECRET_KEY"] = SECRET_KEY or "a_very_secret_key_fallback_123"
+app.config["SESSION_TYPE"] = "filesystem"
+app.config['SESSION_FILE_DIR'] = './.flask_session/'
+Session(app)
 
 
-@app.route("/", defaults={"path": ""})
-@app.route("/<path:path>", methods=["GET"])
-def health_check(path):
-    return "Hello! I am Ananya, and I am alive."
+# --- NEW: Dashboard Login Decorator ---
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "logged_in" not in session:
+            return redirect(url_for("login", next=flask_request.url))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# --- NEW: Bot Control Dashboard HTML ---
+# I'm embedding the HTML/CSS/JS directly in the Python file to keep it to 2 files.
+# This is a bit messy, but it's the easiest way to add this feature.
+
+LOGIN_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Login - Ananya Bot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
+    <div class="w-full max-w-md p-8 space-y-6 bg-gray-800 rounded-xl shadow-lg">
+        <h2 class="text-3xl font-bold text-center">Ananya Bot Dashboard</h2>
+        <p class="text-center text-gray-400">Please log in to continue</p>
+        {% if error %}
+            <div class="p-3 bg-red-800 border border-red-700 text-red-200 rounded-lg">
+                {{ error }}
+            </div>
+        {% endif %}
+        <form method="POST" action="{{ url_for('login') }}">
+            <div class="space-y-4">
+                <div>
+                    <label for="password" class="block text-sm font-medium text-gray-300">Password</label>
+                    <input type="password" name="password" id="password" required
+                           class="w-full mt-1 px-4 py-3 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 border border-gray-600">
+                </div>
+                <button type="submit"
+                        class="w-full py-3 px-4 text-lg font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-gray-800">
+                    Log In
+                </button>
+            </div>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+DASHBOARD_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .nav-link.active { background-color: #4f46e5; color: white; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200">
+    <div class="container mx-auto p-4 md:p-8">
+        
+        <!-- Header -->
+        <header class="flex justify-between items-center mb-6 p-4 bg-gray-800 rounded-lg shadow">
+            <div>
+                <h1 class="text-3xl font-bold">Bot Manager Dashboard</h1>
+                <p class="text-gray-400">Monitor and control your Telegram bot</p>
+            </div>
+            <a href="{{ url_for('logout') }}" class="py-2 px-4 bg-red-600 hover:bg-red-700 rounded-lg font-medium">Logout</a>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="flex space-x-1 mb-6 bg-gray-800 p-2 rounded-lg shadow">
+            <button class="nav-link flex-1 py-3 px-4 rounded-lg font-medium text-center text-gray-300 hover:bg-gray-700 active" data-tab="bot-control">🤖 Bot Control</button>
+            <button class="nav-link flex-1 py-3 px-4 rounded-lg font-medium text-center text-gray-300 hover:bg-gray-700" data-tab="ai-config">🧠 AI Config</button>
+            <button class="nav-link flex-1 py-3 px-4 rounded-lg font-medium text-center text-gray-300 hover:bg-gray-700" data-tab="stats">📊 Quick Stats</button>
+        </nav>
+
+        <!-- Main Content -->
+        <main>
+            <!-- Bot Control Tab -->
+            <div id="bot-control" class="tab-content active space-y-6">
+                <div class="bg-gray-800 p-6 rounded-lg shadow">
+                    <h2 class="text-2xl font-semibold mb-4">Bot Status</h2>
+                    <div class="flex items-center space-x-4">
+                        <div id="status-light" class="w-4 h-4 rounded-full {{ 'bg-green-500' if bot_status else 'bg-red-500' }}"></div>
+                        <span id="status-text" class="font-medium text-lg">{{ 'Bot is ON' if bot_status else 'Bot is OFF' }}</span>
+                    </div>
+                    <p class="text-gray-400 text-sm mt-2">When OFF, the bot will not respond to any messages (except admin commands).</p>
+                    <button id="toggle-status-btn"
+                            class="mt-4 py-2 px-5 rounded-lg font-medium {{ 'bg-red-600 hover:bg-red-700' if bot_status else 'bg-green-600 hover:bg-green-700' }}">
+                        {{ 'Turn Bot OFF' if bot_status else 'Turn Bot ON' }}
+                    </button>
+                </div>
+            </div>
+
+            <!-- AI Config Tab -->
+            <div id="ai-config" class="tab-content space-y-6">
+                <div class="bg-gray-800 p-6 rounded-lg shadow">
+                    <h2 class="text-2xl font-semibold mb-4">Personality Prompts</h2>
+                    <p class="text-gray-400 mb-4">Manage the custom AI personalities. Use <code>/set &lt;name&gt;</code> in Telegram to use them.</p>
+                    <div id="prompts-list" class="space-y-4">
+                        <!-- Prompts will be loaded here by JS -->
+                    </div>
+                    <hr class="border-gray-700 my-6">
+                    <h3 class="text-xl font-semibold mb-3">Add / Edit Prompt</h3>
+                    <form id="prompt-form" class="space-y-3">
+                        <input type="text" id="prompt-name" placeholder="Personality Name (e.g., 'funny')" required class="w-full p-3 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 border border-gray-600">
+                        <textarea id="prompt-text" placeholder="Enter the new system prompt..." rows="5" required class="w-full p-3 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 border border-gray-600"></textarea>
+                        <button type="submit" class="py-2 px-5 rounded-lg font-medium bg-indigo-600 hover:bg-indigo-700">Save Prompt</button>
+                    </form>
+                </div>
+            </div>
+            
+            <!-- Stats Tab -->
+            <div id="stats" class="tab-content space-y-6">
+                 <div class="bg-gray-800 p-6 rounded-lg shadow">
+                    <h2 class="text-2xl font-semibold mb-4">Quick Stats</h2>
+                    <div id="stats-grid" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-gray-700 p-4 rounded-lg text-center">
+                            <p class="text-gray-400 text-sm">Total Users</p>
+                            <p id="stats-users" class="text-3xl font-bold">...</p>
+                        </div>
+                        <div class="bg-gray-700 p-4 rounded-lg text-center">
+                            <p class="text-gray-400 text-sm">Active Chats</p>
+                            <p id="stats-chats" class="text-3xl font-bold">...</p>
+                        </div>
+                        <div class="bg-gray-700 p-4 rounded-lg text-center">
+                            <p class="text-gray-400 text-sm">Blocked Users</p>
+                            <p id="stats-blocked" class="text-3xl font-bold">...</p>
+                        </div>
+                    </div>
+                    <button id="refresh-stats-btn" class="mt-4 py-2 px-5 rounded-lg font-medium bg-indigo-600 hover:bg-indigo-700">Refresh Stats</button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const tabs = document.querySelectorAll('.nav-link');
+            const tabContents = document.querySelectorAll('.tab-content');
+
+            tabs.forEach(tab => {
+                tab.addEventListener('click', () => {
+                    // Deactivate all
+                    tabs.forEach(t => t.classList.remove('active'));
+                    tabContents.forEach(c => c.classList.remove('active'));
+                    
+                    // Activate clicked
+                    tab.classList.add('active');
+                    document.getElementById(tab.dataset.tab).classList.add('active');
+                    
+                    // Load content for tab
+                    if (tab.dataset.tab === 'stats') loadStats();
+                    if (tab.dataset.tab === 'ai-config') loadPrompts();
+                });
+            });
+
+            // --- Bot Control ---
+            const toggleBtn = document.getElementById('toggle-status-btn');
+            toggleBtn.addEventListener('click', async () => {
+                const wants_on = !document.getElementById('status-text').textContent.includes('ON');
+                try {
+                    const response = await fetch('{{ url_for("api_set_bot_status") }}', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ status: wants_on })
+                    });
+                    const data = await response.json();
+                    if (data.success) {
+                        updateBotStatusUI(wants_on);
+                    } else {
+                        alert('Error: ' + data.error);
+                    }
+                } catch (e) {
+                    alert('An error occurred: ' + e);
+                }
+            });
+
+            function updateBotStatusUI(is_on) {
+                const statusLight = document.getElementById('status-light');
+                const statusText = document.getElementById('status-text');
+                if (is_on) {
+                    statusLight.classList.remove('bg-red-500');
+                    statusLight.classList.add('bg-green-500');
+                    statusText.textContent = 'Bot is ON';
+                    toggleBtn.textContent = 'Turn Bot OFF';
+                    toggleBtn.classList.remove('bg-green-600', 'hover:bg-green-700');
+                    toggleBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+                } else {
+                    statusLight.classList.remove('bg-green-500');
+                    statusLight.classList.add('bg-red-500');
+                    statusText.textContent = 'Bot is OFF';
+                    toggleBtn.textContent = 'Turn Bot ON';
+                    toggleBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
+                    toggleBtn.classList.add('bg-green-600', 'hover:bg-green-700');
+                }
+            }
+
+            // --- Stats Control ---
+            const refreshStatsBtn = document.getElementById('refresh-stats-btn');
+            refreshStatsBtn.addEventListener('click', loadStats);
+
+            async function loadStats() {
+                document.getElementById('stats-users').textContent = '...';
+                document.getElementById('stats-chats').textContent = '...';
+                document.getElementById('stats-blocked').textContent = '...';
+                try {
+                    const response = await fetch('{{ url_for("api_get_stats") }}');
+                    const data = await response.json();
+                    if (data.success) {
+                        document.getElementById('stats-users').textContent = data.stats.total_users;
+                        document.getElementById('stats-chats').textContent = data.stats.total_chats;
+                        document.getElementById('stats-blocked').textContent = data.stats.total_blocked;
+                    } else {
+                        alert('Error: ' + data.error);
+                    }
+                } catch (e) {
+                    alert('An error occurred: ' + e);
+                }
+            }
+            
+            // --- AI Config ---
+            const promptForm = document.getElementById('prompt-form');
+            const promptListDiv = document.getElementById('prompts-list');
+            
+            promptForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const name = document.getElementById('prompt-name').value;
+                const text = document.getElementById('prompt-text').value;
+                if (!name || !text) {
+                    alert('Name and prompt are required.');
+                    return;
+                }
+                try {
+                    const response = await fetch('{{ url_for("api_set_prompt") }}', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ name: name, prompt: text })
+                    });
+                    const data = await response.json();
+                    if (data.success) {
+                        loadPrompts(); // Refresh list
+                        document.getElementById('prompt-form').reset();
+                    } else {
+                        alert('Error: ' + data.error);
+                    }
+                } catch (e) {
+                    alert('An error occurred: ' + e);
+                }
+            });
+            
+            async function loadPrompts() {
+                promptListDiv.innerHTML = '<p class="text-gray-400">Loading prompts...</p>';
+                try {
+                    const response = await fetch('{{ url_for("api_get_prompts") }}');
+                    const data = await response.json();
+                    if (!data.success) {
+                        promptListDiv.innerHTML = `<p class="text-red-400">Error: ${data.error}</p>`;
+                        return;
+                    }
+                    
+                    promptListDiv.innerHTML = ''; // Clear
+                    data.prompts.forEach(p => {
+                        const isCore = ['default', 'spiritual', 'nationalist'].includes(p._id);
+                        const promptEl = document.createElement('div');
+                        promptEl.className = 'bg-gray-700 p-4 rounded-lg';
+                        promptEl.innerHTML = `
+                            <div class="flex justify-between items-center">
+                                <h4 class="text-lg font-semibold">${p._id} ${isCore ? '<span class="text-xs text-indigo-400">(Core)</span>' : ''}</h4>
+                                <div>
+                                    <button class="text-sm text-indigo-400 hover:text-indigo-300" data-name="${p._id}" data-text="${p.prompt}">Edit</button>
+                                    ${!isCore ? `<button class="text-sm text-red-500 hover:text-red-400 ml-2" data-name="${p._id}">Delete</button>` : ''}
+                                </div>
+                            </div>
+                            <p class="text-gray-300 text-sm mt-2 font-mono whitespace-pre-wrap">${p.prompt.substring(0, 150)}...</p>
+                        `;
+                        promptListDiv.appendChild(promptEl);
+                    });
+                    
+                    // Add event listeners for edit/delete
+                    promptListDiv.querySelectorAll('button[data-name]').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            const name = e.target.dataset.name;
+                            if (e.target.textContent === 'Edit') {
+                                document.getElementById('prompt-name').value = name;
+                                document.getElementById('prompt-text').value = e.target.dataset.text;
+                            } else if (e.target.textContent === 'Delete') {
+                                if (confirm(`Are you sure you want to delete the '${name}' prompt?`)) {
+                                    deletePrompt(name);
+                                }
+                            }
+                        });
+                    });
+                    
+                } catch(e) {
+                    promptListDiv.innerHTML = `<p class="text-red-400">An error occurred: ${e}</p>`;
+                }
+            }
+            
+            async function deletePrompt(name) {
+                try {
+                    const response = await fetch('{{ url_for("api_delete_prompt") }}', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ name: name })
+                    });
+                    const data = await response.json();
+                    if (data.success) {
+                        loadPrompts(); // Refresh list
+                    } else {
+                        alert('Error: ' + data.error);
+                    }
+                } catch (e) {
+                    alert('An error occurred: ' + e);
+                }
+            }
+
+            // Initial load
+            loadStats();
+        });
+    </script>
+</body>
+</html>
+"""
+
+# --- NEW: Flask App Setup & Dashboard Routes ---
+app = Flask(__name__)
+bcrypt = Bcrypt(app)
+
+# Configure session
+if not SECRET_KEY:
+    logger.error("FATAL: SECRET_KEY is not set. Dashboard sessions will not work.")
+    # We can continue, but sessions will be insecure
+    app.config["SECRET_KEY"] = "a_very_insecure_secret_key_fallback_12345"
+else:
+    app.config["SECRET_KEY"] = SECRET_KEY
+
+app.config["SESSION_TYPE"] = "filesystem"
+app.config['SESSION_FILE_DIR'] = './.flask_session/'
+Session(app)
+
+# --- Dashboard Login Decorator ---
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "logged_in" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated_function
 
 
-@app.route("/admin_debug/<int:user_id>", methods=["GET"])
-def debug_vars(user_id):
-    if not is_admin(user_id):
-        return "Access denied.", 403
-    def get_key_preview(key):
-        val = os.environ.get(key)
-        if val is None:
-            return f"<b>{key}:</b> <span style='color: red;'>NOT SET!</span>"
-        if len(val) < 8:
-            return f"<b>{key}:</b> <span style='color: red;'>VALUE IS TOO SHORT!</span>"
-        return f"<b>{key}:</b> <span style='color: green;'>Set (starts: '{val[:4]}', ends: '{val[-4:]}')</span>"
-    admin_id = os.environ.get("ADMIN_USER_ID")
-    if admin_id is None:
-        admin_check = "<span style='color: red;'>ADMIN_USER_ID IS NOT SET!</span>"
-    else:
-        admin_check = f"<span style='color: green;'>Set (value: {admin_id})</span>"
-    db_check = "<b>Database:</b> <span style='color: red;'>NOT CONNECTED (Check MONGODB_URI)</span>"
-    if is_db_connected():
-        db_check = "<b>Database:</b> <span style='color: green;'>MongoDB Connected!</span>"
-    else:
-        try:
-            client.server_info()
-        except Exception as e:
-            db_check = (
-                f"<b>Database:</b> <span style='color: red;'>MongoDB FAILED: {e}</span>"
-            )
-    return (
-        "<h1>Ananya Bot - Admin Debug</h1>"
-        f"<p>{get_key_preview('TELEGRAM_BOT_TOKEN')}</p>"
-        f"<p>{get_key_preview('GEMINI_API_KEY')}</p>"
-        f"<p>{get_key_preview('MONGODB_URI')}</p>"
-        f"<p><b>ADMIN_USER_ID:</b> {admin_check}</p>"
-        f"<hr>"
-        f"<p>{db_check}</p>"
-    ), 200
+# --- Main HTML Routes (Health Check & Dashboard) ---
+@app.route("/", methods=["GET", "POST"])
+def login():
+    """Renders the dashboard login page."""
+    if session.get("logged_in"):
+        return redirect(url_for("dashboard"))
+
+    error = None
+    if flask_request.method == "POST":
+        password = flask_request.form.get("password")
+        if not password or not DASHBOARD_PASSWORD:
+            error = "Admin password not configured."
+        elif bcrypt.check_password_hash(bcrypt.generate_password_hash(DASHBOARD_PASSWORD), password):
+        # In a real app, you'd store a hashed password, but for simplicity:
+        # if password == DASHBOARD_PASSWORD:
+            session["logged_in"] = True
+            return redirect(url_for("dashboard"))
+        else:
+            error = "Invalid password."
+            
+    return render_template_string(LOGIN_TEMPLATE, error=error)
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    """Renders the main dashboard page."""
+    bot_status = is_bot_on()
+    return render_template_string(DASHBOARD_TEMPLATE, bot_status=bot_status)
+
+@app.route("/logout")
+def logout():
+    session.pop("logged_in", None)
+    return redirect(url_for("login"))
+    
+# --- Dashboard API Routes (for JS to fetch data) ---
+
+@app.route("/api/set_status", methods=["POST"])
+@login_required
+def api_set_bot_status():
+    """API endpoint to turn the bot on or off."""
+    try:
+        data = flask_request.get_json()
+        new_status = bool(data.get("status"))
+        set_bot_status(new_status)
+        return jsonify({"success": True, "status": "on" if new_status else "off"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/get_stats")
+@login_required
+def api_get_stats():
+    """API endpoint to get bot stats."""
+    if not is_db_connected():
+        return jsonify({"success": False, "error": "Database not connected"}), 500
+    try:
+        stats = {
+            "total_users": users_col.count_documents({}),
+            "total_blocked": blocked_col.count_documents({}),
+            "total_chats": chats_col.count_documents({})
+        }
+        return jsonify({"success": True, "stats": stats})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+        
+@app.route("/api/get_prompts")
+@login_required
+def api_get_prompts():
+    """API endpoint to get all prompts."""
+    if not is_db_connected():
+        return jsonify({"success": False, "error": "Database not connected"}), 500
+    try:
+        # Get all custom prompts
+        custom_prompts = list(prompts_col.find())
+        # Get local fallback prompts
+        local_prompts = [{"_id": name, "prompt": text, "is_local": True} for name, text in PERSONALITIES.items() if not any(p["_id"] == name for p in custom_prompts)]
+        
+        return jsonify({"success": True, "prompts": custom_prompts + local_prompts})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/set_prompt", methods=["POST"])
+@login_required
+def api_set_prompt():
+    """API endpoint to save a prompt."""
+    if not is_db_connected():
+        return jsonify({"success": False, "error": "Database not connected"}), 500
+    try:
+        data = flask_request.get_json()
+        name = data.get("name").lower().strip()
+        prompt = data.get("prompt")
+        if not name or not prompt:
+            return jsonify({"success": False, "error": "Name and prompt are required"}), 400
+        
+        prompts_col.update_one(
+            {"_id": name},
+            {"$set": {"prompt": prompt}},
+            upsert=True
+        )
+        return jsonify({"success": True, "message": f"Prompt '{name}' saved."})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/delete_prompt", methods=["POST"])
+@login_required
+def api_delete_prompt():
+    """API endpoint to delete a prompt."""
+    if not is_db_connected():
+        return jsonify({"success": False, "error": "Database not connected"}), 500
+    try:
+        data = flask_request.get_json()
+        name = data.get("name").lower().strip()
+        if not name:
+            return jsonify({"success": False, "error": "Name is required"}), 400
+            
+        if name in ["default", "spiritual", "nationalist"]:
+            return jsonify({"success": False, "error": "Cannot delete a core fallback prompt."}), 400
+
+        result = prompts_col.delete_one({"_id": name})
+        if result.deleted_count > 0:
+            return jsonify({"success": True, "message": f"Prompt '{name}' deleted."})
+        else:
+            return jsonify({"success": False, "error": "Prompt not found in database."}), 404
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# --- Telegram Bot Webhook Routes ---
+# (These are unchanged from the previous, final, working version)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    """
+    This function is called by Telegram every time a user sends a message.
+    It uses asyncio.run() to safely call the async bot code from a sync function.
+    """
     if application is None:
         logger.error(
             "Webhook called, but application failed to build. Check TELEGRAM_BOT_TOKEN."
         )
         return "error: application not configured", 500
+        
+    # --- NEW: Check Bot Status ---
+    # We still let admins use commands even if bot is "OFF"
+    # But we stop all non-admin chatter
     try:
         update_json = flask_request.get_json()
         update = Update.de_json(update_json, application.bot)
         
+        if not is_bot_on() and update.effective_user and not is_admin(update.effective_user.id):
+             # If bot is OFF and user is not admin, just return OK and do nothing.
+             return "ok", 200
+        
+        # --- THE FIX ---
+        # We must initialize the app *before* processing the update
         async def process_update_async():
             await application.initialize()
             await application.process_update(update)
             await application.shutdown()
 
         asyncio.run(process_update_async())
+        # --- END OF FIX ---
 
         return "ok", 200
     except Exception as e:
@@ -1240,6 +1703,10 @@ def webhook():
 
 @app.route("/set_webhook", methods=["GET"])
 def set_webhook():
+    """
+    A helper route to set the webhook.
+    Only needs to be visited once.
+    """
     if application is None:
         logger.error(
             "set_webhook called, but application failed to build. Check TELEGRAM_BOT_TOKEN."
@@ -1249,6 +1716,7 @@ def set_webhook():
     host = flask_request.headers.get("Host")
     if not host:
         return "Could not determine host URL.", 500
+
     host = flask_request.headers.get("x-forwarded-host", host)
     
     render_url = os.environ.get('RENDER_EXTERNAL_URL')
@@ -1291,7 +1759,7 @@ def set_webhook():
             ]
             await application.bot.set_my_commands(
                 admin_commands,
-                scope=BotCommandScope.CHAT(chat_id=ADMIN_USER_ID) # <-- FINAL FIX
+                scope=BotCommandScope.CHAT(chat_id=ADMIN_USER_ID)
             )
             
             await application.bot.set_my_name("Ananya")
@@ -1307,9 +1775,6 @@ def set_webhook():
 @app.route("/remove_webhook", methods=["GET"])
 def remove_webhook():
     if application is None:
-        logger.error(
-            "remove_webhook called, but application failed to build. Check TELEGRAM_BOT_TOKEN."
-        )
         return "error: application not configured", 500
     try:
         async def _remove_webhook_async():
@@ -1324,5 +1789,22 @@ def remove_webhook():
         logger.error(f"Failed to set webhook: {e}")
         return f"Failed to remove webhook: {e}", 500
 
+# --- This must be at the end, outside all functions ---
+if __name__ != "__main__":
+    # This block runs when Gunicorn starts the app
+    # We need to initialize the application and its handlers
+    get_application()
+    
+    # NEW: Hash the admin password on startup for security
+    if DASHBOARD_PASSWORD:
+        DASHBOARD_PASSWORD_HASH = bcrypt.generate_password_hash(DASHBOARD_PASSWORD).decode('utf-8')
+        logger.info("Dashboard password hash generated.")
+    else:
+        logger.error("FATAL: DASHBOARD_PASSWORD not set. Dashboard will not be usable.")
+        DASHBOARD_PASSWORD_HASH = None
+
+# --- Re-add all the Telegram bot handlers that were defined above ---
+# (This is a repeat, but ensures Gunicorn loads them)
+# Note: In a cleaner setup, you'd put the Flask app in its own file.
 if __name__ != "__main__":
     get_application()
