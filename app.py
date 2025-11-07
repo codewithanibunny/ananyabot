@@ -18,7 +18,7 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - Public /voice command to change TTS voice.
 - Admin /admin_delete_prompt command.
 - Dynamic /set <personality> command.
-- NEW: Dynamic command lists (Admin sees admin commands, public sees public)
+- Dynamic command lists (Admin vs. Public).
 - NEW: FINAL FIX for BotCommandScope error.
 - NEW: Fix for /help admin contact link.
 """
@@ -32,7 +32,7 @@ import base64   # <-- NEW FOR IMAGES
 import io       # <-- NEW FOR IMAGES
 import wave     # <-- NEW FOR TTS
 import struct   # <-- NEW FOR TTS
-from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated, BotCommandScope, BotCommandScopeChat # <-- FINAL FIX
+from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated, BotCommandScope # <-- FINAL FIX
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -1530,7 +1530,7 @@ def set_webhook():
             ]
             await application.bot.set_my_commands(
                 admin_commands,
-                scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID) # <-- FINAL FIX
+                scope=BotCommandScope.CHAT(chat_id=ADMIN_USER_ID) # <-- FINAL FIX
             )
             # --- END DYNAMIC COMMANDS ---
             
