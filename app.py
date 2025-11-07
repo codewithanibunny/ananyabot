@@ -9,7 +9,7 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - MongoDB for the database.
 - requests for simple, blocking API calls.
 - The FINAL asyncio.run() fix for the "Application.initialize" errors.
-- Image recognition (vision) support.
+- Image recognition (vision) support. (NOW FIXED)
 - Voice note handling (replies in text).
 - Admin-only broadcast feature.
 - Public TTS (Text-to-Speech) command.
@@ -19,8 +19,8 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - Admin /admin_delete_prompt command.
 - Dynamic /set <personality> command.
 - Dynamic command lists (Admin vs. Public).
-- NEW: FINAL FIX for BotCommandScope error.
-- NEW: Fix for /help admin contact link.
+- Force-join verification system.
+- ALL BUGS FIXED (NameError, ScopeError, DownloadError, DivError)
 """
 
 import logging
@@ -32,7 +32,8 @@ import base64   # <-- NEW FOR IMAGES
 import io       # <-- NEW FOR IMAGES
 import wave     # <-- NEW FOR TTS
 import struct   # <-- NEW FOR TTS
-from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated, BotCommandScope # <-- FINAL FIX
+# --- THIS IS THE FINAL IMPORT FIX ---
+from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated, BotCommandScope, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -40,8 +41,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ChatMemberHandler,
-    CallbackQueryHandler # <-- NEW
+    CallbackQueryHandler # <-- Import fix
 )
+# --- END OF IMPORT FIX ---
 from telegram.constants import ParseMode, ChatType
 from telegram.error import Forbidden, BadRequest # <-- NEW for broadcast
 
