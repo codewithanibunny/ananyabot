@@ -18,8 +18,8 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - Public /voice command to change TTS voice.
 - Admin /admin_delete_prompt command.
 - Dynamic /set <personality> command.
-- NEW: Dynamic command lists (Admin sees admin commands, public sees public)
-- NEW: Clickable admin link in /help
+- Dynamic command lists (Admin vs. Public).
+- NEW: Force-join verification system.
 """
 
 import logging
@@ -31,7 +31,7 @@ import base64   # <-- NEW FOR IMAGES
 import io       # <-- NEW FOR IMAGES
 import wave     # <-- NEW FOR TTS
 import struct   # <-- NEW FOR TTS
-from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated, BotCommandScope
+from telegram import Update, BotCommand, ChatMember, ChatMemberUpdated, BotCommandScope, InlineKeyboardButton, InlineKeyboardMarkup # <-- NEW
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -39,6 +39,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ChatMemberHandler,
+    CallbackQueryHandler # <-- NEW
 )
 from telegram.constants import ParseMode, ChatType
 from telegram.error import Forbidden, BadRequest # <-- NEW for broadcast
@@ -58,6 +59,12 @@ try:
 except (ValueError, TypeError):
     print("FATAL: ADMIN_USER_ID is not set or invalid.")
     ADMIN_USER_ID = 0
+
+# --- NEW: VERIFICATION GROUP/CHANNEL ---
+# These MUST be the @usernames (or numeric IDs for private groups)
+GROUP_USERNAME = "@ananyabotchat"
+CHANNEL_USERNAME = "@ananyabotupdates"
+# ---
 
 # --- PERSONALITY PROMPTS (These are now FALLBACKS/DEFAULTS) ---
 PERSONALITIES = {
@@ -622,6 +629,12 @@ def pcm_to_wav(pcm_data: bytes) -> io.BytesIO:
 
 async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Public command to test Text-to-Speech."""
+    # --- NEW: Verification Check ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return # The check function will send the verify message
+    # --- End Check ---
+    
     user_id = update.effective_user.id
     log_user(update.effective_user)
     if is_user_blocked(user_id):
@@ -663,28 +676,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user(user) # Sync function
     if is_user_blocked(user.id): # Sync function
         return
+        
     context.chat_data.setdefault("personality", "default")
     context.chat_data.setdefault("voice", "Kore") # <-- NEW: Set default voice
     update_active_chats(update.effective_chat.id, "add") # Sync function
     
+    # --- NEW: Verification System ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        # Check if user is already a member
+        if await check_user_membership(update, context, send_message=False):
+            # User is already verified, just send normal welcome
+            welcome_text = (
+                f"Hi {user.first_name}! I'm Ananya, your friendly AI assistant. 🇮🇳\n\n"
+                "I see you're already a member of our community. Welcome back! 😉\n\n"
+                "You can chat with me, or type /help to see all my commands."
+            )
+            await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
+        else:
+            # User is not verified, send the verification message
+            await send_verification_message(update)
+        return # Stop here for private chats
+    # --- End Verification System ---
+    
+    # This part now only runs for Group Chats
     welcome_text = (
-        f"Hi {user.first_name}! I'm Ananya, your friendly AI assistant. 🇮🇳\n\n"
-        "I'm here to chat, answer questions, and help you out. "
-        "By default, I'm in my natural, helpful personality."
+        f"Hi everyone! I'm Ananya, your friendly AI assistant. 🇮🇳\n\n"
+        "To talk to me in this group, please @-mention me "
+        f"(e.g., @{context.bot.username}) or reply to my messages.\n\n"
+        "Type /help to see all my commands and personalities!"
     )
-    if (
-        update.effective_chat.type == ChatType.GROUP
-        or update.effective_chat.type == ChatType.SUPERGROUP
-    ):
-        welcome_text += (
-            "\n\n<b>Group Chat Info:</b>\n"
-            f"To talk to me in this group, please @-mention me (e.g., @{context.bot.username}) or reply to my messages."
-        )
-    welcome_text += "\n\nType /help to see all my commands and personalities!"
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
 
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- NEW: Verification Check ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return # The check function will send the verify message
+    # --- End Check ---
+    
     user = update.effective_user
     log_user(user) # Sync function
     if is_user_blocked(user.id): # Sync function
@@ -706,7 +736,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>spiritual</code>\n"
         "• <code>nationalist</code>\n"
         "(Your admin can add more!)\n\n"
+        # --- THIS IS THE FIX ---
+        # We use a tg:// user link, which is cleaner than a full URL
         f'For more information and help, you can <a href="tg://user?id={ADMIN_USER_ID}">contact my admin</a>.'
+        # --- END OF FIX ---
     )
 
     try:
@@ -720,6 +753,12 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- UPDATED: SET PERSONALITY (NOW DYNAMIC) ---
 async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- NEW: Verification Check ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return # The check function will send the verify message
+    # --- End Check ---
+    
     user = update.effective_user
     log_user(user) # Sync function
     if is_user_blocked(user.id): # Sync function
@@ -749,6 +788,12 @@ async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- NEW: SET VOICE COMMAND ---
 async def set_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- NEW: Verification Check ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return # The check function will send the verify message
+    # --- End Check ---
+    
     user = update.effective_user
     log_user(user)
     if is_user_blocked(user.id):
@@ -780,6 +825,12 @@ async def set_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- NEW: Verification Check ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return # The check function will send the verify message
+    # --- End Check ---
+    
     user = update.effective_user
     log_user(user) # Sync function
     if is_user_blocked(user.id): # Sync function
@@ -943,6 +994,12 @@ def get_gemini_response(
 
 # --- CORE MESSAGE HANDLER (NOW ASYNC) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- NEW: Verification Check ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return # The check function will send the verify message
+    # --- End Check ---
+    
     user = update.effective_user
     chat = update.effective_chat
     chat_id = chat.id
@@ -1004,6 +1061,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- NEW: IMAGE HANDLER (NOW ASYNC) ---
 async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- NEW: Verification Check ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return # The check function will send the verify message
+    # --- End Check ---
+    
     user = update.effective_user
     chat = update.effective_chat
     chat_id = chat.id
@@ -1061,8 +1124,14 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "Sorry, I had trouble seeing that image. Could you try again?",
         )
 
-# --- NEW: VOICE HANDLER (NOW ASNT) ---
+# --- NEW: VOICE HANDLER (NOW ASYNT) ---
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- NEW: Verification Check ---
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return # The check function will send the verify message
+    # --- End Check ---
+    
     user = update.effective_user
     chat = update.effective_chat
     chat_id = chat.id
@@ -1106,6 +1175,118 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
+# --- NEW: VERIFICATION HELPER FUNCTIONS ---
+
+def get_verification_buttons() -> InlineKeyboardMarkup:
+    """Returns the inline keyboard with Join and Verify buttons."""
+    keyboard = [
+        [
+            InlineKeyboardButton("1. Join Chat 💬", url=f"https://t.me/{GROUP_USERNAME.lstrip('@')}"),
+            InlineKeyboardButton("2. Join Channel 📢", url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")
+        ],
+        [
+            InlineKeyboardButton("✅ Verify Me", callback_data="verify_membership")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_verification_message(update: Update):
+    """Sends the message telling the user to join."""
+    text = (
+        "<b>Welcome! To chat with me, you must be a member of our community.</b>\n\n"
+        "Please join our chat and channel, then click 'Verify Me'.\n\n"
+        "1. **Join the Chat:** @ananyabotchat\n"
+        "2. **Join the Channel:** @ananyabotupdates"
+    )
+    await update.message.reply_text(
+        text,
+        reply_markup=get_verification_buttons(),
+        parse_mode=ParseMode.HTML
+    )
+
+async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TYPE, send_message: bool = True) -> bool:
+    """
+    Checks if the user is in the group and channel.
+    If they are, it sets the chat_data flag and returns True.
+    If not, it sends a message (if send_message=True) and returns False.
+    """
+    user_id = update.effective_user.id
+    
+    # If user is already verified in this session, skip the check
+    if context.chat_data.get('is_verified', False):
+        return True
+        
+    # Admin is always verified
+    if is_admin(user_id):
+        context.chat_data['is_verified'] = True
+        return True
+
+    # --- This is the core logic ---
+    try:
+        # Check channel
+        channel_member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        if channel_member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR]:
+            if send_message:
+                await update.message.reply_text(
+                    "It looks like you haven't joined the **Channel** yet. Please join and click Verify again.",
+                    reply_markup=get_verification_buttons(),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            return False
+
+        # Check group
+        group_member = await context.bot.get_chat_member(chat_id=GROUP_USERNAME, user_id=user_id)
+        if group_member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR]:
+            if send_message:
+                await update.message.reply_text(
+                    "It looks like you haven't joined the **Chat Group** yet. Please join and click Verify again.",
+                    reply_markup=get_verification_buttons(),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            return False
+
+        # If we get here, the user is in both!
+        context.chat_data['is_verified'] = True
+        return True
+
+    except BadRequest as e:
+        if "user not found" in str(e).lower():
+             if send_message:
+                await update.message.reply_text(
+                    "It looks like you haven't joined both groups yet. Please join them and click Verify again.",
+                    reply_markup=get_verification_buttons()
+                )
+        else:
+            logger.error(f"Verification error: {e}")
+            if send_message:
+                await update.message.reply_text(f"An error occurred during verification. The bot might not be an admin in the groups. (Error: {e})")
+        return False
+    except Exception as e:
+        logger.error(f"Verification error: {e}")
+        if send_message:
+            await update.message.reply_text(f"An error occurred during verification. (Error: {e})")
+        return False
+
+# --- NEW: VERIFY BUTTON CALLBACK HANDLER ---
+async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Runs when the user clicks the '✅ Verify Me' button."""
+    query = update.callback_query
+    await query.answer() # Acknowledge the button click
+    
+    if await check_user_membership(update, context, send_message=False):
+        # User is verified!
+        context.chat_data['is_verified'] = True
+        await query.edit_message_text(
+            "<b>Verification successful!</b> ✅\n\nYou're all set. You can chat with me now!",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        # User is not in one or both groups
+        await query.message.reply_text(
+            "❌ **Verification Failed**\n\nI checked, and it looks like you haven't joined both the chat and the channel yet. \n\nPlease join both and then click '✅ Verify Me' again.",
+            reply_markup=get_verification_buttons(),
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 # --- BOT & WEBHOOK INITIALIZATION ---
 # A lock to ensure only one thread initializes the bot
@@ -1157,6 +1338,9 @@ def get_application():
                         CommandHandler("set", set_personality) # <-- THIS IS THE NEW DYNAMIC COMMAND
                     )
                     application.add_handler(CommandHandler("voice", set_voice)) # <-- NEW
+                    
+                    # --- NEW: Verification Handler ---
+                    application.add_handler(CallbackQueryHandler(verify_callback, pattern="^verify_membership$"))
                     
                     # --- NEW HANDLERS ---
                     # Add image and voice handlers *before* the general text handler
@@ -1345,7 +1529,7 @@ def set_webhook():
             ]
             await application.bot.set_my_commands(
                 admin_commands,
-                scope=BotCommandScope.CHAT(ADMIN_USER_ID)
+                scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID) # <-- FINAL FIX
             )
             # --- END DYNAMIC COMMANDS ---
             
