@@ -20,7 +20,7 @@ This is the final, stable, SYNCHRONOUS version. It includes:
 - Dynamic /set <personality> command.
 - Dynamic command lists (Admin vs. Public).
 - Force-join verification system.
-- ALL BUGS FIXED (NameError, ScopeError, DownloadError, DivError)
+- ALL BUGS FIXED (NameError, ScopeError, DownloadError, DivError, CreatorError)
 """
 
 import logging
@@ -1227,8 +1227,9 @@ async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TY
     # --- This is the core logic ---
     try:
         # Check channel
+        # --- FINAL BUG FIX HERE ---
         channel_member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        if channel_member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR]:
+        if channel_member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]: # <-- FIXED
             if send_message:
                 await update.message.reply_text(
                     "It looks like you haven't joined the **Channel** yet. Please join and click Verify again.",
@@ -1239,7 +1240,7 @@ async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TY
 
         # Check group
         group_member = await context.bot.get_chat_member(chat_id=GROUP_USERNAME, user_id=user_id)
-        if group_member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR]:
+        if group_member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]: # <-- FIXED
             if send_message:
                 await update.message.reply_text(
                     "It looks like you haven't joined the **Chat Group** yet. Please join and click Verify again.",
@@ -1247,6 +1248,7 @@ async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TY
                     parse_mode=ParseMode.MARKDOWN
                 )
             return False
+        # --- END OF FIX ---
 
         # If we get here, the user is in both!
         context.chat_data['is_verified'] = True
