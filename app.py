@@ -1,30 +1,14 @@
+# -*- coding: utf-8 -*-
 """
 Ananya - Your Friendly Telegram Bot (Render Version)
 Powered by Google Gemini
 
-This is the final, stable, SYNCHRONOUS version. It includes:
-- Flask for Render.
-- gunicorn as the server.
-- MongoDB for the database.
-- requests for simple, blocking API calls.
-- The FINAL asyncio.run() fix for the "Application.initialize" errors.
-- Image recognition (vision) support. (NOW FIXED)
-- Voice note handling (replies in text).
-- Admin-only broadcast feature.
-- Public TTS (Text-to-Speech) command.
-- Persistent prompts saved in MongoDB.
-- Flirty default personality.
-- Public /voice command to change TTS voice.
-- Admin /admin_delete_prompt command.
-- Dynamic /set <personality> command.
-- Dynamic command lists (Admin vs. Public).
-- Force-join verification system.
-- ALL BUGS FIXED (NameError, ScopeError, DownloadError, DivError, CreatorError)
-
+This version is the FINAL, STABLE build. It includes:
+- All Telegram bot features (personalities, memory, vision, TTS, broadcast, force-join).
+- All bug fixes (asyncio, NameErrors, ScopeErrors).
+- A full, password-protected admin dashboard hosted on the root URL.
+- NEW: Fixed critical API key leak in error messages.
 """
-
-
-
 
 # --- Core Python Imports ---
 import logging
@@ -857,10 +841,12 @@ def get_gemini_response(
             return "Sorry, my AI brain isn't working right now. (Admin: Check Gemini API Key permissions)"
         if e.response.status_code == 500:
             return "Sorry, my AI brain is having problems. (Admin: 500 Server Error)"
-        return f"Sorry, I'm having trouble connecting to my brain. (Error: {e})"
+        # --- THIS IS THE API KEY LEAK FIX ---
+        return f"Sorry, I'm having trouble connecting to my brain. (Error: HTTP {e.response.status_code})"
     except requests.exceptions.RequestException as e:
         logger.error(f"Gemini API request failed: {e}")
-        return f"Sorry, I'm having trouble connecting to my brain. (Error: {e})"
+        # --- THIS IS THE API KEY LEAK FIX ---
+        return "Sorry, I'm having trouble connecting to my brain. (Network Error)"
     except Exception as e:
         logger.error(
             f"Error processing Gemini response: {e}. Full response: {response.text if 'response' in locals() else 'N/A'}"
@@ -1182,7 +1168,7 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "logged_in" not in session:
-            return redirect(url_for("login", next=flask_request.url))
+            return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -1538,17 +1524,17 @@ def login_required(f):
 @app.route("/", methods=["GET", "POST"])
 def login():
     """Renders the dashboard login page."""
+    global DASHBOARD_PASSWORD_HASH # Use the global hash
+    
     if session.get("logged_in"):
         return redirect(url_for("dashboard"))
 
     error = None
     if flask_request.method == "POST":
         password = flask_request.form.get("password")
-        if not password or not DASHBOARD_PASSWORD:
-            error = "Admin password not configured."
-        elif bcrypt.check_password_hash(bcrypt.generate_password_hash(DASHBOARD_PASSWORD), password):
-        # In a real app, you'd store a hashed password, but for simplicity:
-        # if password == DASHBOARD_PASSWORD:
+        if not password or not DASHBOARD_PASSWORD_HASH:
+            error = "Admin password not configured on server."
+        elif bcrypt.check_password_hash(DASHBOARD_PASSWORD_HASH, password):
             session["logged_in"] = True
             return redirect(url_for("dashboard"))
         else:
@@ -1790,6 +1776,7 @@ def remove_webhook():
         return f"Failed to remove webhook: {e}", 500
 
 # --- This must be at the end, outside all functions ---
+DASHBOARD_PASSWORD_HASH = None # Initialize as None
 if __name__ != "__main__":
     # This block runs when Gunicorn starts the app
     # We need to initialize the application and its handlers
@@ -1802,9 +1789,3 @@ if __name__ != "__main__":
     else:
         logger.error("FATAL: DASHBOARD_PASSWORD not set. Dashboard will not be usable.")
         DASHBOARD_PASSWORD_HASH = None
-
-# --- Re-add all the Telegram bot handlers that were defined above ---
-# (This is a repeat, but ensures Gunicorn loads them)
-# Note: In a cleaner setup, you'd put the Flask app in its own file.
-if __name__ != "__main__":
-    get_application()
