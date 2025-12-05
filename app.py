@@ -21,6 +21,7 @@ import io
 import wave
 import struct
 import threading
+import datetime  # <-- NEW for logging timestamps
 from functools import wraps # <-- NEW for dashboard login
 
 # --- Telegram Imports ---
@@ -50,12 +51,21 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MONGODB_URI = os.environ.get("MONGODB_URI")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD") # <-- NEW
 SECRET_KEY = os.environ.get("SECRET_KEY") # <-- NEW
+LOG_CHANNEL_ID = os.environ.get("LOG_CHANNEL_ID")  # <-- NEW: For logging bot activities
 
 try:
     ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID"))
 except (ValueError, TypeError):
     print("FATAL: ADMIN_USER_ID is not set or invalid.")
     ADMIN_USER_ID = 0
+
+# Convert LOG_CHANNEL_ID to int if provided
+try:
+    LOG_CHANNEL_ID = int(LOG_CHANNEL_ID) if LOG_CHANNEL_ID else None
+except (ValueError, TypeError):
+    LOG_CHANNEL_ID = None
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.warning("LOG_CHANNEL_ID is not a valid integer. Logging to channel disabled.")
 
 # --- VERIFICATION GROUP/CHANNEL ---
 GROUP_USERNAME = "@ananyabotchat"
@@ -114,6 +124,7 @@ try:
     history_col = db.chat_history
     prompts_col = db.prompts
     status_col = db.bot_status # <-- NEW: For the on/off switch
+    logs_col = db.chat_logs # <-- NEW: For storing all chat logs and user data
     logger.info("MongoDB client created and collections initialized.")
 except Exception as e:
     logger.error(f"FATAL: Could not create MongoDB client: {e}")
@@ -125,6 +136,7 @@ except Exception as e:
     history_col = None
     prompts_col = None
     status_col = None
+    logs_col = None
 
 # --- MONGODB DATABASE FUNCTIONS ---
 def is_db_connected():
@@ -136,6 +148,7 @@ def is_db_connected():
         or history_col is None
         or prompts_col is None
         or status_col is None # <-- NEW
+        or logs_col is None # <-- NEW
         or client is None
     ):
         logger.error("Database client is not configured.")
@@ -178,6 +191,151 @@ def is_bot_on() -> bool:
         logger.error(f"Error getting bot status: {e}")
         return False # Fail safe
 
+# --- NEW: CHAT LOGGING FUNCTIONS ---
+def log_chat_message(user_id: int, user: object, chat_id: int, message_text: str, message_type: str = "text"):
+    """Logs every message to the database with user and chat information."""
+    if not is_db_connected():
+        return
+    try:
+        log_entry = {
+            "timestamp": datetime.datetime.utcnow(),
+            "user_id": user_id,
+            "user_name": user.first_name if user else "Unknown",
+            "user_username": user.username if user else None,
+            "user_last_name": user.last_name if user else None,
+            "user_is_bot": user.is_bot if user else False,
+            "user_language_code": user.language_code if user else None,
+            "chat_id": chat_id,
+            "message_type": message_type,  # 'text', 'image', 'voice', etc.
+            "message_text": message_text[:1000] if message_text else "",  # Limit to 1000 chars
+        }
+        logs_col.insert_one(log_entry)
+        logger.debug(f"Chat logged: User {user_id} in chat {chat_id} - Type: {message_type}")
+    except Exception as e:
+        logger.error(f"Error logging chat message: {e}")
+
+def log_user_action(user_id: int, user: object, action: str, details: dict = None):
+    """Logs specific user actions (command usage, settings changes, etc.)"""
+    if not is_db_connected():
+        return
+    try:
+        log_entry = {
+            "timestamp": datetime.datetime.utcnow(),
+            "user_id": user_id,
+            "user_name": user.first_name if user else "Unknown",
+            "user_username": user.username if user else None,
+            "action": action,  # e.g., '/voice', '/set', '/send_image', '/gen_image'
+            "details": details or {},
+        }
+        logs_col.insert_one(log_entry)
+        logger.info(f"User action logged: User {user_id} performed: {action}")
+    except Exception as e:
+        logger.error(f"Error logging user action: {e}")
+
+def get_chat_logs(limit: int = 100, user_id: int = None, chat_id: int = None) -> list:
+    """Retrieves chat logs from the database. Can filter by user_id or chat_id."""
+    if not is_db_connected():
+        return []
+    try:
+        query = {}
+        if user_id:
+            query["user_id"] = user_id
+        if chat_id:
+            query["chat_id"] = chat_id
+        
+        logs = list(logs_col.find(query).sort("timestamp", -1).limit(limit))
+        return logs
+    except Exception as e:
+        logger.error(f"Error retrieving chat logs: {e}")
+        return []
+
+def get_user_stats(user_id: int) -> dict:
+    """Gets statistics for a specific user."""
+    if not is_db_connected():
+        return {}
+    try:
+        user_logs = list(logs_col.find({"user_id": user_id}))
+        total_messages = len([log for log in user_logs if log.get("message_type")])
+        total_actions = len([log for log in user_logs if log.get("action")])
+        
+        return {
+            "user_id": user_id,
+            "total_messages": total_messages,
+            "total_actions": total_actions,
+            "first_seen": user_logs[-1]["timestamp"] if user_logs else None,
+            "last_seen": user_logs[0]["timestamp"] if user_logs else None,
+        }
+    except Exception as e:
+        logger.error(f"Error getting user stats: {e}")
+        return {}
+
+# --- NEW: LOG CHANNEL FUNCTIONS ---
+async def send_to_log_channel(context: ContextTypes.DEFAULT_TYPE, message: str, parse_mode: str = "HTML"):
+    """Sends a message to the log channel."""
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=message,
+            parse_mode=parse_mode
+        )
+    except Exception as e:
+        logger.error(f"Error sending to log channel: {e}")
+
+async def log_user_activity_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, user_name: str, action: str, details: str = ""):
+    """Logs user activity to the log channel."""
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = f"<b>📝 User Activity Log</b>\n"
+        message += f"<b>Time:</b> {timestamp}\n"
+        message += f"<b>User:</b> {user_name} (ID: <code>{user_id}</code>)\n"
+        message += f"<b>Action:</b> {action}\n"
+        if details:
+            message += f"<b>Details:</b> {details}\n"
+        
+        await send_to_log_channel(context, message)
+    except Exception as e:
+        logger.error(f"Error logging user activity to channel: {e}")
+
+async def log_message_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, user_name: str, message_text: str, message_type: str = "text", chat_info: str = ""):
+    """Logs a message to the log channel."""
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_msg = f"<b>💬 Message Log</b>\n"
+        log_msg += f"<b>Time:</b> {timestamp}\n"
+        log_msg += f"<b>User:</b> {user_name} (ID: <code>{user_id}</code>)\n"
+        log_msg += f"<b>Type:</b> {message_type}\n"
+        if message_text:
+            truncated_text = message_text[:150] + "..." if len(message_text) > 150 else message_text
+            log_msg += f"<b>Message:</b> <code>{truncated_text}</code>\n"
+        if chat_info:
+            log_msg += f"<b>Chat:</b> {chat_info}\n"
+        
+        await send_to_log_channel(context, log_msg)
+    except Exception as e:
+        logger.error(f"Error logging message to channel: {e}")
+
+async def log_error_to_channel(context: ContextTypes.DEFAULT_TYPE, error_type: str, error_message: str, user_id: int = None):
+    """Logs errors to the log channel for debugging."""
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_msg = f"<b>🚨 Error Log</b>\n"
+        log_msg += f"<b>Time:</b> {timestamp}\n"
+        log_msg += f"<b>Error Type:</b> {error_type}\n"
+        log_msg += f"<b>Message:</b> <code>{error_message[:200]}</code>\n"
+        if user_id:
+            log_msg += f"<b>User ID:</b> <code>{user_id}</code>\n"
+        
+        await send_to_log_channel(context, log_msg)
+    except Exception as e:
+        logger.error(f"Error logging error to channel: {e}")
 
 # --- (All other database functions: log_user, is_user_blocked, etc. are unchanged) ---
 def log_user(user: Update.effective_user):
@@ -288,7 +446,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/block &lt;user_id&gt;</code> - Blocks a user from the bot.\n"
         "• <code>/unblock &lt;user_id&gt;</code> - Unblocks a user.\n\n"
         "<b>Bot Stats:</b>\n"
-        "• <code>/admin_stats</code> - Shows usage statistics.\n\n"
+        "• <code>/admin_stats</code> - Shows usage statistics.\n"
+        "• <code>/admin_logs [limit]</code> - Shows recent chat logs (default: 50, max: 500).\n"
+        "• <code>/admin_user_logs &lt;user_id&gt; [limit]</code> - Shows logs for specific user.\n\n"
         "<b>Content Management:</b>\n"
         "• <code>/news [query]</code> - Fetches verified news. \n"
         "• <code>/broadcast &lt;text&gt;</code> - Sends text to all users.\n"
@@ -325,6 +485,112 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Error in admin_stats_command: {e}")
         await update.message.reply_text("Error fetching stats.")
 
+# --- NEW: ADMIN LOG COMMANDS ---
+async def admin_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows recent chat logs."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "You do not have permission to use this command."
+        )
+        return
+    if not is_db_connected():
+        await update.message.reply_text("Error: Database is not connected.")
+        return
+    
+    try:
+        limit = int(context.args[0]) if context.args else 50
+        limit = min(limit, 500)  # Cap at 500
+        
+        logs = get_chat_logs(limit=limit)
+        if not logs:
+            await update.message.reply_text("No logs found.")
+            return
+        
+        message = f"<b>Recent {len(logs)} Chat Logs:</b>\n\n"
+        for log in logs:
+            timestamp = log.get("timestamp", "Unknown")
+            user_id = log.get("user_id", "Unknown")
+            user_name = log.get("user_name", "Unknown")
+            msg_type = log.get("message_type", "unknown")
+            msg_text = log.get("message_text", "")[:50]
+            
+            message += f"<b>[{timestamp}]</b> {user_name} (ID: {user_id}) - Type: {msg_type}\n"
+            if msg_text:
+                message += f"  Text: <code>{msg_text}...</code>\n"
+            message += "\n"
+        
+        # Split into chunks if too long
+        if len(message) > 4096:
+            messages = [message[i:i+4096] for i in range(0, len(message), 4096)]
+            for msg in messages:
+                await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    except ValueError:
+        await update.message.reply_text("Usage: /admin_logs [limit (1-500)]")
+    except Exception as e:
+        logger.error(f"Error in admin_logs_command: {e}")
+        await update.message.reply_text(f"Error fetching logs: {e}")
+
+async def admin_user_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows logs for a specific user."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "You do not have permission to use this command."
+        )
+        return
+    if not is_db_connected():
+        await update.message.reply_text("Error: Database is not connected.")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        limit = int(context.args[1]) if len(context.args) > 1 else 50
+        limit = min(limit, 500)  # Cap at 500
+        
+        logs = get_chat_logs(limit=limit, user_id=user_id)
+        if not logs:
+            await update.message.reply_text(f"No logs found for user {user_id}.")
+            return
+        
+        stats = get_user_stats(user_id)
+        
+        message = f"<b>Logs for User {user_id}:</b>\n"
+        message += f"• <b>Total Messages:</b> {stats.get('total_messages', 0)}\n"
+        message += f"• <b>Total Actions:</b> {stats.get('total_actions', 0)}\n"
+        message += f"• <b>First Seen:</b> {stats.get('first_seen', 'Unknown')}\n"
+        message += f"• <b>Last Seen:</b> {stats.get('last_seen', 'Unknown')}\n\n"
+        message += f"<b>Recent {len(logs)} Logs:</b>\n\n"
+        
+        for log in logs:
+            timestamp = log.get("timestamp", "Unknown")
+            msg_type = log.get("message_type", "unknown")
+            action = log.get("action", "")
+            msg_text = log.get("message_text", "")[:50]
+            details = log.get("details", {})
+            
+            if action:
+                message += f"<b>[{timestamp}]</b> Action: {action}\n"
+                if details:
+                    message += f"  Details: {details}\n"
+            else:
+                message += f"<b>[{timestamp}]</b> Type: {msg_type}\n"
+                if msg_text:
+                    message += f"  Text: <code>{msg_text}...</code>\n"
+            message += "\n"
+        
+        # Split into chunks if too long
+        if len(message) > 4096:
+            messages = [message[i:i+4096] for i in range(0, len(message), 4096)]
+            for msg in messages:
+                await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    except (ValueError, IndexError):
+        await update.message.reply_text("Usage: /admin_user_logs <user_id> [limit (1-500)]")
+    except Exception as e:
+        logger.error(f"Error in admin_user_logs_command: {e}")
+        await update.message.reply_text(f"Error fetching user logs: {e}")
 
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -539,15 +805,17 @@ def generate_voice_response(text_to_speak: str, voice_name: str = "Kore") -> byt
         raise Exception("Admin: GEMINI_API_KEY is not configured.")
     api_url = f"https{os.environ.get('GEMINI_API_URL', '://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent')}?key={GEMINI_API_KEY}"
     prompt = f"Say this in a friendly, female, Hinglish voice: {text_to_speak}"
-    if voice_name not in AVAILABLE_VOICES:
-        voice_name = "Kore"
+    # Normalize voice name to lowercase for API consistency
+    voice_name_lower = voice_name.lower().strip()
+    if voice_name_lower not in AVAILABLE_VOICES:
+        voice_name_lower = "kore"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
             "speechConfig": {
                 "voiceConfig": {
-                    "prebuiltVoiceConfig": {"voiceName": voice_name} 
+                    "prebuiltVoiceConfig": {"voiceName": voice_name_lower} 
                 }
             }
         },
@@ -585,6 +853,79 @@ def pcm_to_wav(pcm_data: bytes) -> io.BytesIO:
     wav_buffer.seek(0)
     return wav_buffer
 
+# --- IMAGE GENERATION FUNCTIONS ---
+def generate_image(prompt: str) -> io.BytesIO:
+    """Generates an image using Gemini 3 Pro API and returns it as BytesIO."""
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY not set.")
+        raise Exception("Admin: GEMINI_API_KEY is not configured.")
+    
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.0-pro:generateContent?key={GEMINI_API_KEY}"
+    
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": prompt
+            }]
+        }],
+        "generationConfig": {
+            "responseModalities": ["image"],
+            "temperature": 0.7,
+            "topP": 0.95,
+            "topK": 40,
+            "maxOutputTokens": 4096
+        }
+    }
+    
+    headers = {"Content-Type": "application/json"}
+    
+    try:
+        response = requests.post(api_url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extract image data from response
+        image_data_base64 = (
+            result.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("inlineData", {})
+            .get("data", "")
+        )
+        
+        if not image_data_base64:
+            logger.error("Gemini Image Generation returned no image data.")
+            raise Exception("Gemini returned no image data.")
+        
+        image_bytes = base64.b64decode(image_data_base64)
+        image_buffer = io.BytesIO(image_bytes)
+        image_buffer.seek(0)
+        return image_buffer
+        
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Gemini Image API request failed: {e.response.text}")
+        if e.response.status_code == 429:
+            raise Exception("You're making too many image requests! Please wait a minute and try again.")
+        elif e.response.status_code == 400:
+            raise Exception("Invalid image prompt. Please try a different description.")
+        else:
+            raise Exception(f"Gemini Image API error: {e.response.status_code}")
+    except Exception as e:
+        logger.error(f"Error in generate_image: {e}")
+        raise e
+
+def generate_ananya_image() -> io.BytesIO:
+    """Generates Ananya's image based on a predefined description."""
+    ananya_prompt = (
+        "A beautiful, friendly young Indian woman named Ananya with a warm smile. "
+        "She has long flowing black hair, bright and expressive eyes, and is wearing "
+        "traditional Indian attire - a colorful saree or salwar kameez. She looks "
+        "cheerful, approachable, and has a gentle, kind expression. The background is "
+        "soft and dreamy with warm lighting. Digital art style, professional, realistic."
+    )
+    
+    return generate_image(ananya_prompt)
+
 async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == ChatType.PRIVATE:
         if not await check_user_membership(update, context):
@@ -616,7 +957,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_user_blocked(user.id):
         return
     context.chat_data.setdefault("personality", "default")
-    context.chat_data.setdefault("voice", "Kore")
+    context.chat_data.setdefault("voice", "kore")  # Store in lowercase
     update_active_chats(update.effective_chat.id, "add")
     if update.effective_chat.type == ChatType.PRIVATE:
         if await check_user_membership(update, context, send_message=False):
@@ -656,7 +997,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/reset</code> - Resets me to my default friendly personality.\n"
         "<code>/say &lt;text&gt;</code> - I will speak the text back to you in a .wav audio file.\n"
         "<code>/voice &lt;name&gt;</code> - Change my voice for the /say command. Type <code>/voice</code> to see all options.\n"
-        "<code>/set &lt;name&gt;</code> - <b>NEW:</b> Change my personality (e.g., <code>/set spiritual</code>).\n\n"
+        "<code>/set &lt;name&gt;</code> - <b>NEW:</b> Change my personality (e.g., <code>/set spiritual</code>).\n"
+        "<code>/send_image</code> - <b>NEW:</b> Get a picture of me! 📸\n"
+        "<code>/gen_image &lt;description&gt;</code> - <b>NEW:</b> Generate an image based on your description! 🎨\n"
+        "• Or just say \"<code>Send your image</code>\" or \"<code>Generate image of...</code>\" in chat!\n\n"
         "<b>Default Personalities:</b>\n"
         "• <code>spiritual</code>\n"
         "• <code>nationalist</code>\n"
@@ -684,6 +1028,8 @@ async def set_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except IndexError:
         await update.message.reply_text("Usage: /set <personality_name>\n(e.g., /set spiritual)")
         return
+    log_user_action(user.id, user, "/set", {"personality": command, "chat_id": update.effective_chat.id})  # NEW: Log action
+    await log_user_activity_to_channel(context, user.id, user.first_name or "Unknown", "/set", f"Personality: {command}")  # NEW: Log to channel
     custom_prompt_doc = None
     if is_db_connected():
         custom_prompt_doc = prompts_col.find_one({"_id": command})
@@ -706,7 +1052,7 @@ async def set_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     voice_name = " ".join(context.args).lower().strip()
     if not voice_name:
-        current_voice = context.chat_data.get("voice", "Kore")
+        current_voice = context.chat_data.get("voice", "kore")
         message = "<b>Choose a voice for me!</b>\n\n"
         message += f"Your current voice is: <b>{current_voice.capitalize()}</b>\n\n"
         message += "Available voices:\n"
@@ -715,7 +1061,9 @@ async def set_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
         return
     if voice_name in AVAILABLE_VOICES:
-        context.chat_data["voice"] = voice_name.capitalize()
+        context.chat_data["voice"] = voice_name  # Store in lowercase
+        log_user_action(update.effective_user.id, update.effective_user, "/voice", {"voice": voice_name, "chat_id": update.effective_chat.id})  # NEW: Log action
+        await log_user_activity_to_channel(context, update.effective_user.id, update.effective_user.first_name or "Unknown", "/voice", f"Voice: {voice_name}")  # NEW: Log to channel
         await update.message.reply_text(
             f"My voice is now set to <b>{voice_name.capitalize()}</b>! Try it out with the <code>/say</code> command.",
             parse_mode=ParseMode.HTML
@@ -737,6 +1085,71 @@ async def reset_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "I'm back to my natural self! I've also cleared our recent chat history for a fresh start.",
     )
+
+# --- NEW: IMAGE COMMAND HANDLERS ---
+async def send_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /send_image command - sends Ananya's picture."""
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return
+    user_id = update.effective_user.id
+    user = update.effective_user
+    log_user(user)
+    log_user_action(user_id, user, "/send_image", {"chat_id": update.effective_chat.id})  # NEW: Log action
+    await log_user_activity_to_channel(context, user_id, user.first_name or "Unknown", "/send_image", f"Chat ID: {update.effective_chat.id}")  # NEW: Log to channel
+    if is_user_blocked(user_id):
+        return
+    
+    await update.message.chat.send_action(action="upload_photo")
+    try:
+        image_buffer = generate_ananya_image()
+        if not image_buffer:
+            await update.message.reply_text("Sorry, I couldn't generate my image right now. Please try again later.")
+            return
+        await update.message.reply_photo(photo=image_buffer, caption="Here's a picture of me! 😊")
+        await log_message_to_channel(context, user_id, user.first_name or "Unknown", "[Image sent - Ananya's picture]", "image", f"Chat ID: {update.effective_chat.id}")  # NEW
+    except Exception as e:
+        logger.error(f"Error in send_image_command: {e}")
+        await log_error_to_channel(context, "send_image_command", str(e), user_id)  # NEW: Log error
+        await update.message.reply_text(f"Sorry, I couldn't generate my image: {e}")
+
+async def gen_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /gen_image command - generates images based on user prompt."""
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if not await check_user_membership(update, context):
+            return
+    user_id = update.effective_user.id
+    user = update.effective_user
+    log_user(user)
+    prompt = " ".join(context.args)
+    log_user_action(user_id, user, "/gen_image", {"prompt": prompt, "chat_id": update.effective_chat.id})  # NEW: Log action
+    await log_user_activity_to_channel(context, user_id, user.first_name or "Unknown", "/gen_image", f"Prompt: {prompt[:100]}")  # NEW: Log to channel
+    if is_user_blocked(user_id):
+        return
+    
+    if not prompt:
+        await update.message.reply_text("Usage: /gen_image <description of what you want me to generate>")
+        return
+    
+    await update.message.chat.send_action(action="upload_photo")
+    try:
+        image_buffer = generate_image(prompt)
+        if not image_buffer:
+            await update.message.reply_text("Sorry, I couldn't generate the image. Please try again later.")
+            return
+        await update.message.reply_photo(photo=image_buffer, caption=f"✨ Generated: {prompt}")
+        await log_message_to_channel(context, user_id, user.first_name or "Unknown", prompt, "generated_image", f"Chat ID: {update.effective_chat.id}")  # NEW
+    except Exception as e:
+        logger.error(f"Error in gen_image_command: {e}")
+        await log_error_to_channel(context, "gen_image_command", str(e), user_id)  # NEW: Log error
+        await update.message.reply_text(f"Sorry, I couldn't generate that image: {e}")
+        if not image_buffer:
+            await update.message.reply_text("Sorry, I couldn't generate the image. Please try again later.")
+            return
+        await update.message.reply_photo(photo=image_buffer, caption=f"✨ Generated: {prompt}")
+    except Exception as e:
+        logger.error(f"Error in gen_image_command: {e}")
+        await update.message.reply_text(f"Sorry, I couldn't generate that image: {e}")
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -862,6 +1275,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     chat_id = chat.id
     log_user(user)
+    log_chat_message(user.id, user, chat_id, update.message.text or "[No text]", "text")  # NEW: Log message
     if is_user_blocked(user.id):
         return
     prompt = update.message.text
@@ -882,6 +1296,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prompt = prompt.replace(f"@{context.bot.username}", "").strip()
     if not prompt and not (update.message.photo or update.message.voice):
         return
+    
+    # --- NEW: Check if user is asking for image generation or Ananya's picture ---
+    if prompt:
+        prompt_lower = prompt.lower()
+        # Check if asking for Ananya's picture
+        if any(phrase in prompt_lower for phrase in ["send your image", "send your picture", "show me your picture", "show yourself", "what do you look like", "show me what you look like"]):
+            await update.message.chat.send_action(action="upload_photo")
+            try:
+                image_buffer = generate_ananya_image()
+                if image_buffer:
+                    await update.message.reply_photo(photo=image_buffer, caption="Here's a picture of me! 😊")
+                else:
+                    await update.message.reply_text("Sorry, I couldn't generate my image right now.")
+            except Exception as e:
+                logger.error(f"Error generating Ananya image: {e}")
+                await update.message.reply_text(f"Sorry, I couldn't generate my image: {e}")
+            return
+        
+        # Check if asking to generate an image
+        if any(phrase in prompt_lower for phrase in ["generate image", "gen image", "create image", "make image", "draw", "generate a picture", "create a picture", "make a picture"]):
+            # Extract the image description (remove the command words)
+            image_prompt = prompt
+            for phrase in ["generate image", "gen image", "create image", "make image", "generate a picture", "create a picture", "make a picture"]:
+                image_prompt = image_prompt.lower().replace(phrase, "").strip()
+            
+            if image_prompt:
+                await update.message.chat.send_action(action="upload_photo")
+                try:
+                    image_buffer = generate_image(image_prompt)
+                    if image_buffer:
+                        await update.message.reply_photo(photo=image_buffer, caption=f"✨ Generated: {image_prompt}")
+                    else:
+                        await update.message.reply_text("Sorry, I couldn't generate that image.")
+                except Exception as e:
+                    logger.error(f"Error generating image: {e}")
+                    await update.message.reply_text(f"Sorry, I couldn't generate that image: {e}")
+                return
+    
     personality = context.chat_data.get("personality", "default")
     await update.message.chat.send_action(action="typing")
     try:
@@ -893,8 +1345,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_history.append({"role": "user", "parts": [{"text": prompt}]})
         chat_history.append({"role": "model", "parts": [{"text": response_text}]})
         save_chat_history(chat_id, chat_history)
+        # Log message to channel (limit frequency to avoid spam - only log sample messages)
+        import random
+        if random.random() < 0.1:  # Log 10% of messages
+            await log_message_to_channel(context, user.id, user.first_name or "Unknown", prompt, "text", f"Chat ID: {chat_id}")
     except Exception as e:
         logger.error(f"Error in handle_message: {e}")
+        await log_error_to_channel(context, "handle_message", str(e), user.id)  # NEW: Log error
         await update.message.reply_text(
             "Sorry, I had a little hiccup. Could you try that again?",
         )
@@ -908,6 +1365,7 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
     chat = update.effective_chat
     chat_id = chat.id
     log_user(user)
+    log_chat_message(user.id, user, chat_id, update.message.caption or "[Image without caption]", "image")  # NEW: Log image
     if is_user_blocked(user.id):
         return
     await update.message.chat.send_action(action="typing")
@@ -948,6 +1406,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     chat = update.effective_chat
     chat_id = chat.id
     log_user(user)
+    log_chat_message(user.id, user, chat_id, "[Voice note received]", "voice")  # NEW: Log voice
     if is_user_blocked(user.id):
         return
     reply_text = "Arre waah, voice note! Cool. Main abhi voice notes sun nahi sakti, kyunki mere paas kaan nahi hain! 😅 \nAap type karke bataoge toh main pakka reply karungi!"
@@ -1104,6 +1563,8 @@ def get_application():
                     application.add_handler(
                         CommandHandler("admin_stats", admin_stats_command)
                     )
+                    application.add_handler(CommandHandler("admin_logs", admin_logs_command))  # NEW
+                    application.add_handler(CommandHandler("admin_user_logs", admin_user_logs_command))  # NEW
                     application.add_handler(CommandHandler("block", block_command))
                     application.add_handler(CommandHandler("unblock", unblock_command))
                     application.add_handler(
@@ -1119,6 +1580,8 @@ def get_application():
                     application.add_handler(CommandHandler("broadcast", broadcast_command))
                     application.add_handler(MessageHandler(filters.PHOTO & filters.Caption(("/broadcast")), broadcast_command))
                     application.add_handler(CommandHandler("say", say_command))
+                    application.add_handler(CommandHandler("send_image", send_image_command))  # NEW
+                    application.add_handler(CommandHandler("gen_image", gen_image_command))  # NEW
                     application.add_handler(CommandHandler("start", start))
                     application.add_handler(CommandHandler("help", show_help))
                     application.add_handler(CommandHandler("reset", reset_personality))
