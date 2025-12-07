@@ -855,62 +855,60 @@ def pcm_to_wav(pcm_data: bytes) -> io.BytesIO:
 
 # --- IMAGE GENERATION FUNCTIONS ---
 def generate_image(prompt: str) -> io.BytesIO:
-    """Generates an image using Stable Diffusion XL via the Replicate API."""
+    """Generates an image using Gemini 2.0 Flash API and returns it as BytesIO."""
     if not GEMINI_API_KEY:
-        logger.error("REPLICATE_API_TOKEN or image generation API not configured.")
-        raise Exception("Admin: Image generation API is not configured.")
+        logger.error("GEMINI_API_KEY not set.")
+        raise Exception("Admin: GEMINI_API_KEY is not configured.")
     
-    # Using Replicate API for image generation (better than Gemini for image gen)
-    api_url = "https://api.replicate.com/v1/predictions"
-    
-    headers = {
-        "Authorization": f"Token {GEMINI_API_KEY}",  # Using GEMINI_API_KEY field to store token
-        "Content-Type": "application/json"
-    }
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     payload = {
-        "version": "39ed52f2a60c3b36b4cb12d87d92c94b0ebb036435aace3498f5b2720495e32a",
-        "input": {
-            "prompt": prompt,
-            "num_outputs": 1,
-            "image_dimensions": "768x768",
-            "num_inference_steps": 25,
-            "guidance_scale": 3.5,
-            "scheduler": "DPMSolverMultistep"
+        "contents": [{
+            "parts": [{
+                "text": prompt
+            }]
+        }],
+        "generationConfig": {
+            "temperature": 0.7,
+            "topP": 0.95,
+            "topK": 40,
+            "maxOutputTokens": 4096
         }
     }
     
+    headers = {"Content-Type": "application/json"}
+    
     try:
-        response = requests.post(api_url, json=payload, headers=headers, timeout=120)
+        response = requests.post(api_url, json=payload, headers=headers, timeout=60)
         response.raise_for_status()
         result = response.json()
         
-        # Extract image URL from Replicate response
-        output = result.get("output", [])
-        if not output or not output[0]:
-            logger.error("Image generation returned no image.")
-            raise Exception("Image generation failed - no output received.")
+        # Extract image data from response
+        image_data_base64 = (
+            result.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("inlineData", {})
+            .get("data", "")
+        )
         
-        image_url = output[0]
+        if not image_data_base64:
+            logger.error("Gemini Image Generation returned no image data.")
+            raise Exception("Gemini returned no image data.")
         
-        # Download the image
-        img_response = requests.get(image_url, timeout=30)
-        img_response.raise_for_status()
-        
-        image_buffer = io.BytesIO(img_response.content)
+        image_bytes = base64.b64decode(image_data_base64)
+        image_buffer = io.BytesIO(image_bytes)
         image_buffer.seek(0)
         return image_buffer
         
     except requests.exceptions.HTTPError as e:
-        logger.error(f"Image generation API request failed: {e.response.text}")
-        if e.response.status_code == 401:
-            raise Exception("Image generation API key is invalid.")
-        elif e.response.status_code == 429:
-            raise Exception("Too many image requests! Please wait a minute and try again.")
+        logger.error(f"Gemini Image API request failed: {e.response.text}")
+        if e.response.status_code == 429:
+            raise Exception("You're making too many image requests! Please wait a minute and try again.")
         elif e.response.status_code == 400:
             raise Exception("Invalid image prompt. Please try a different description.")
         else:
-            raise Exception(f"Image generation error: {e.response.status_code}")
+            raise Exception(f"Gemini Image API error: {e.response.status_code}")
     except Exception as e:
         logger.error(f"Error in generate_image: {e}")
         raise e
